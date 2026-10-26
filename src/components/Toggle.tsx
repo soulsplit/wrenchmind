@@ -1,0 +1,22 @@
+interface ToggleProps {
+  checked: boolean
+  onChange: (next: boolean) => void
+  label?: string
+}
+
+export default function Toggle({ checked, onChange, label = 'Enable Voice Assistant' }: ToggleProps) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={() => onChange(!checked)}
+      className={`min-h-[48px] min-w-[48px] px-4 py-3 rounded-lg font-bold shadow text-base active:scale-95 transition ${
+        checked ? 'bg-green-500 text-white' : 'bg-white/90 text-black'
+      }`}
+    >
+      {checked ? 'Disable Voice' : label}
+    </button>
+  )
+}

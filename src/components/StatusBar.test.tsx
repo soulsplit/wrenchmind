@@ -1,0 +1,17 @@
+import { describe, expect, it } from 'vitest'
+import { render, screen } from '@testing-library/react'
+import StatusBar from './StatusBar'
+import type { Status } from '../types'
+
+describe('StatusBar', () => {
+  it.each<[Status, string]>([
+    ['off', '[ OFF ]'],
+    ['listening', '[ 🟢 LISTENING... ]'],
+    ['analyzing', '[ ⚡ ANALYZING... ]'],
+    ['error', '[ ⚠ ERROR ]'],
+  ])('renders %s as %s', (status, label) => {
+    render(<StatusBar status={status} />)
+    const el = screen.getByRole('status')
+    expect(el).toHaveTextContent(label)
+  })
+})
