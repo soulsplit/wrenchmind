@@ -18,20 +18,78 @@ export function getShareWarning(href: string): string | null {
   return null
 }
 
-/** Shows a QR code of the current page URL for opening it on another device. */
+const SHARE_URL_KEY = 'wrenchmind.shareUrl'
+
+function isValidUrl(value: string): boolean {
+  try {
+    new URL(value)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** A previously saved override (e.g. the tunnel URL), or null. */
+function loadSavedUrl(): string | null {
+  try {
+    const saved = window.localStorage.getItem(SHARE_URL_KEY)
+    return saved && isValidUrl(saved) ? saved : null
+  } catch {
+    return null
+  }
+}
+
+function saveUrl(url: string): void {
+  try {
+    window.localStorage.setItem(SHARE_URL_KEY, url)
+  } catch {
+    /* private mode etc. — the QR still works for this session */
+  }
+}
+
+function clearSavedUrl(): void {
+  try {
+    window.localStorage.removeItem(SHARE_URL_KEY)
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Shows a QR code for opening the app on another device. Defaults to the
+ * current page URL, but the user can paste an override (typically the
+ * cloudflared tunnel URL) which is remembered across sessions.
+ */
 export default function QrShare() {
   const [open, setOpen] = useState(false)
-  const [href, setHref] = useState('')
+  const [url, setUrl] = useState(() => loadSavedUrl() ?? window.location.href)
+  const [draft, setDraft] = useState(() => loadSavedUrl() ?? window.location.href)
 
   useEffect(() => {
     if (!open) return
-    setHref(window.location.href)
+    const initial = loadSavedUrl() ?? window.location.href
+    setUrl(initial)
+    setDraft(initial)
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') setOpen(false)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [open ])
+
+  const onDraftChange = (value: string): void => {
+    setDraft(value)
+    if (isValidUrl(value)) {
+      setUrl(value)
+      saveUrl(value)
+    }
+  }
+
+  const useCurrentPage = (): void => {
+    clearSavedUrl()
+    setUrl(window.location.href)
+    setDraft(window.location.href)
+  }
 
   return (
     <div className="flex flex-col items-start">
@@ -55,12 +113,42 @@ export default function QrShare() {
             aria-label="Share via QR code"
             onClick={(event) => event.stopPropagation()}
           >
-            <QRCodeSVG value={href} size={256} aria-label={`QR code for ${href}`} />
-            <div className="text-sm text-black/70 break-all max-w-[280px] text-center">{href}</div>
-            {href && getShareWarning(href) && (
+            <QRCodeSVG value={url} size={256} aria-label={`QR code for ${url}`} />
+            <div className="text-sm text-black/70 break-all max-w-[280px] text-center">{url}</div>
+            <label
+              className="flex flex-col gap-1 w-full max-w-[280px] text-sm text-black/70"
+              htmlFor="qr-share-url"
+            >
+              Share URL (paste the tunnel URL here)
+              <input
+                id="qr-share-url"
+                type="url"
+                value={draft}
+                onChange={(event) => onDraftChange(event.target.value)}
+                autoComplete="off"
+                spellCheck={false}
+                placeholder="https://…trycloudflare.com/wrenchmind/"
+                className="min-h-[48px] px-3 py-2 rounded-lg border border-black/20 text-black text-base outline-none focus:border-black/60"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={useCurrentPage}
+              className="min-h-[48px] px-4 py-2 rounded-lg bg-black/10 text-black font-bold text-base active:scale-95 transition"
+            >
+              Use current page
+            </button>
+            {!isValidUrl(draft) ? (
               <div className="text-sm text-amber-700 bg-amber-100 rounded px-3 py-2 max-w-[280px] text-center">
-                {getShareWarning(href)}
+                Enter a valid URL (https://…) — showing the last valid one.
               </div>
+            ) : (
+              url &&
+              getShareWarning(url) && (
+                <div className="text-sm text-amber-700 bg-amber-100 rounded px-3 py-2 max-w-[280px] text-center">
+                  {getShareWarning(url)}
+                </div>
+              )
             )}
             <button
               type="button"

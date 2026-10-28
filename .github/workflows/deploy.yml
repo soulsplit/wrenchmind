@@ -2,6 +2,7 @@ name: Deploy to GitHub Pages
 on:
   push:
     branches: [main]
+  pull_request:
 permissions:
   contents: read
   pages: write
@@ -10,26 +11,51 @@ concurrency:
   group: pages
   cancel-in-progress: false
 jobs:
-  build:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 18
           cache: npm
       - run: npm ci
-      - run: npm test
+      - run: npm run lint
+      - run: npx vitest run --coverage
       - run: npm run build
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: dist
   deploy:
-    needs: build
+    needs: validate
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+      - run: npm ci
+      - name: Check deploy secret
+        run: |
+          if [ -z "${{ secrets.VITE_META_MODEL_API_KEY }}" ]; then
+            echo "::error::VITE_META_MODEL_API_KEY secret is not set. Add it at Settings → Secrets and variables → Actions, then re-run."
+            exit 1
+          fi
+      - run: npm run build
+        env:
+          VITE_META_MODEL_API_KEY: ${{ secrets.VITE_META_MODEL_API_KEY }}
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
       - id: deployment
         uses: actions/deploy-pages@v4
+  smoke:
+    needs: deploy
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - run: curl -sfL --retry 5 --retry-delay 10 "${{ needs.deploy.outputs.page_url }}" | grep -q '<div id="root">'

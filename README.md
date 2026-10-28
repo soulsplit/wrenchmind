@@ -58,6 +58,17 @@ git push -u origin main
 
 then enable Pages with the **GitHub Actions** source in the repo settings.
 
+## CI
+
+`.github/workflows/deploy.yml` runs three jobs: `validate` (lint, tests with
+coverage report, production build) on every push and pull request — no secret
+needed; `deploy` on `main` only, building with the `VITE_META_MODEL_API_KEY`
+repo secret and publishing `dist/` to Pages; `smoke` curls the live Pages URL
+and fails if the app shell isn't served. Set the secret at Settings →
+Secrets and variables → Actions before the first push (the deploy job fails
+with instructions if it's missing). Pinned runtime: Node 18
+(`.nvmrc`, `engines`, workflow).
+
 ## How it works
 
 1. `Scanner` shows the rear camera full-viewport with a transparent AR canvas.

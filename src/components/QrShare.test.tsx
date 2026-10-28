@@ -1,6 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
 import QrShare, { getShareWarning } from './QrShare'
+
+beforeEach(() => {
+  window.localStorage.clear()
+})
 
 describe('getShareWarning', () => {
   it('warns for loopback addresses', () => {
@@ -33,6 +37,41 @@ describe('QrShare', () => {
     render(<QrShare />)
     fireEvent.click(screen.getByText('QR'))
     expect(screen.getByRole('dialog')).toHaveTextContent('only works on this device')
+  })
+
+  it('encodes a pasted tunnel URL and remembers it', () => {
+    const tunnel = 'https://abc.trycloudflare.com/wrenchmind/'
+    const { unmount } = render(<QrShare />)
+    fireEvent.click(screen.getByText('QR'))
+    fireEvent.change(screen.getByLabelText(/Share URL/), { target: { value: tunnel } })
+    expect(screen.getByLabelText(`QR code for ${tunnel}`)).toBeInTheDocument()
+    expect(screen.queryByText(/only works on this device/)).not.toBeInTheDocument()
+    unmount()
+
+    render(<QrShare />)
+    fireEvent.click(screen.getByText('QR'))
+    expect(screen.getByLabelText(`QR code for ${tunnel}`)).toBeInTheDocument()
+  })
+
+  it('resets to the current page on request', () => {
+    render(<QrShare />)
+    fireEvent.click(screen.getByText('QR'))
+    fireEvent.change(screen.getByLabelText(/Share URL/), {
+      target: { value: 'https://abc.trycloudflare.com/wrenchmind/' },
+    })
+    fireEvent.click(screen.getByText('Use current page'))
+    expect(screen.getByLabelText(`QR code for ${window.location.href}`)).toBeInTheDocument()
+    expect(window.localStorage.getItem('wrenchmind.shareUrl')).toBeNull()
+  })
+
+  it('keeps the last valid URL when the input is invalid', () => {
+    render(<QrShare />)
+    fireEvent.click(screen.getByText('QR'))
+    const qr = () => screen.getByLabelText(`QR code for ${window.location.href}`)
+    expect(qr()).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText(/Share URL/), { target: { value: 'not a url' } })
+    expect(qr()).toBeInTheDocument()
+    expect(screen.getByText(/Enter a valid URL/)).toBeInTheDocument()
   })
 
   it('closes via Close button, backdrop, and Escape', () => {
