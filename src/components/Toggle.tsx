@@ -4,7 +4,7 @@ interface ToggleProps {
   label?: string
 }
 
-export default function Toggle({ checked, onChange, label = 'Enable Voice Assistant' }: ToggleProps) {
+export default function Toggle({ checked, onChange, label = 'Voice mode' }: ToggleProps) {
   return (
     <button
       type="button"
@@ -16,7 +16,7 @@ export default function Toggle({ checked, onChange, label = 'Enable Voice Assist
         checked ? 'bg-green-500 text-white' : 'bg-white/90 text-black'
       }`}
     >
-      {checked ? 'Disable Voice' : label}
+      {checked ? `Disable ${label}` : label}
     </button>
   )
 }

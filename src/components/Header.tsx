@@ -18,12 +18,13 @@ interface HeaderProps {
   multiCamera: boolean
   onSwitchCamera: () => void
   onClearView: () => void
+  onExportReport: () => void
 }
 
 /**
- * Pin-top mobile header zone: an h-14 bar (brand, voice toggle, one-tap QR,
- * overflow for logs + secondary controls) with the LIVE/facing/status badge
- * row docked over the feed beneath it.
+ * Pin-top mobile header zone: an h-14 bar (brand + overflow toggle) with the
+ * LIVE/facing/status badge row docked over the feed beneath it. Voice toggle,
+ * QR share, logs, and secondary controls all live behind the overflow menu.
  *
  * No backdrop-blur/transform on this tree by design: QrShare's share dialog
  * is `position: fixed`, and a filter would re-anchor it to the header.
@@ -38,6 +39,7 @@ export default function Header({
   multiCamera,
   onSwitchCamera,
   onClearView,
+  onExportReport,
 }: HeaderProps) {
   const [overflowOpen, setOverflowOpen] = useState(false)
 
@@ -56,9 +58,7 @@ export default function Header({
         <span className="min-w-0 truncate text-xs font-bold tracking-wide text-white">
           WRENCHMIND
         </span>
-        <Toggle checked={voiceOn} onChange={onVoiceToggle} label="Voice" />
         <div className="flex-1" aria-hidden="true" />
-        <QrShare />
         <button
           type="button"
           onClick={() => setOverflowOpen((was) => !was)}
@@ -77,6 +77,8 @@ export default function Header({
             right: 'max(1rem, env(safe-area-inset-right))',
           }}
         >
+          <Toggle checked={voiceOn} onChange={onVoiceToggle} label="Voice mode" />
+          <QrShare />
           <LogPanel />
           {multiCamera && (
             <button
@@ -94,6 +96,13 @@ export default function Header({
             className="min-h-[48px] bg-white/90 text-black px-4 py-3 rounded-lg font-bold shadow text-base active:scale-95 transition"
           >
             Clear AR View
+          </button>
+          <button
+            type="button"
+            onClick={onExportReport}
+            className="min-h-[48px] bg-white/90 text-black px-4 py-3 rounded-lg font-bold shadow text-base active:scale-95 transition"
+          >
+            Export Report
           </button>
         </div>
       )}

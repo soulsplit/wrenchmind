@@ -4,6 +4,11 @@ export interface SpatialResult {
   approx_x: number
   /** Approximate target y in 0-100 viewport percent. */
   approx_y: number
+  /**
+   * Every visible instance for plural commands ("all bolts"), 0-100 pct.
+   * Undefined for singular targets. Clamped and capped by the parser.
+   */
+  points?: { x: number; y: number }[]
   speech_response: string | null
   display_mode: 'visual_only' | 'speech_and_visual'
 }
@@ -29,7 +34,7 @@ export interface MaskRecord {
   raster: Uint8Array
 }
 
-export type Status = 'off' | 'listening' | 'analyzing' | 'error'
+export type Status = 'off' | 'listening' | 'analyzing' | 'speaking' | 'error'
 
 export interface MemoryEntry {
   phrase: string

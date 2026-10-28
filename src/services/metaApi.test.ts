@@ -126,6 +126,41 @@ describe('reasonSpatial', () => {
     ])
   })
 
+  it('parses plural points, clamped and capped', async () => {
+    vi.stubEnv('VITE_META_MODEL_API_KEY', 'k')
+    vi.stubGlobal('fetch', fetchMock)
+    const points = [
+      { x: 10, y: 20 },
+      { x: 150, y: -5 },
+      { x: 'nope', y: 30 },
+      ...Array.from({ length: 8 }, (_, i) => ({ x: i, y: i })),
+    ]
+    fetchMock.mockResolvedValue(
+      jsonResponse(sparkEnvelope(JSON.stringify({ target_label: 'bolts', points }))),
+    )
+
+    const result = await reasonSpatial('img', 'show all bolts', '')
+    expect(result.points).toEqual([
+      { x: 10, y: 20 },
+      { x: 100, y: 0 },
+      ...Array.from({ length: 6 }, (_, i) => ({ x: i, y: i })),
+    ])
+  })
+
+  it('omits points for singular targets and requests them for plural ones', async () => {
+    vi.stubEnv('VITE_META_MODEL_API_KEY', 'k')
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue(
+      jsonResponse(sparkEnvelope(JSON.stringify({ target_label: 'x' }))),
+    )
+
+    const result = await reasonSpatial('img', 'phrase', '')
+    expect(result.points).toBeUndefined()
+    const [, init] = fetchMock.mock.calls[0] as [string, { body: string }]
+    const body = JSON.parse(init.body) as { messages: [{ content: string }] }
+    expect(body.messages[0].content).toContain('points')
+  })
+
   it('normalizes a non-string speech response to null', async () => {
     vi.stubEnv('VITE_META_MODEL_API_KEY', 'k')
     vi.stubGlobal('fetch', fetchMock)
@@ -228,6 +263,26 @@ describe('segmentImage', () => {
     expect(body.stream).toBe(true)
     expect(body.input[0].content[0].text).toBe('<0f>1<|point;x=320;y=120;w=640;h=480|>')
     expect(body.metadata).toEqual({ mask_encoding: 'one_bit' })
+  })
+
+  it('sends one object per point when given an array', async () => {
+    vi.stubEnv('VITE_META_MODEL_API_KEY', 'k')
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue(sseResponse([]))
+
+    await collect(
+      segmentImage('img', 'bolt', [
+        { x: 10, y: 20, width: 640, height: 480 },
+        { x: 30, y: 40, width: 640, height: 480 },
+      ]),
+    )
+    const [, init] = fetchMock.mock.calls[0] as [string, { body: string }]
+    const body = JSON.parse(init.body) as {
+      input: [{ content: [{ text: string }] }]
+    }
+    expect(body.input[0].content[0].text).toBe(
+      '<0f>1<|point;x=10;y=20;w=640;h=480|>,2<|point;x=30;y=40;w=640;h=480|>',
+    )
   })
 
   it('sends a bare noun phrase when no point is given', async () => {

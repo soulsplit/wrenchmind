@@ -13,6 +13,7 @@ function renderHeader(overrides: Partial<Parameters<typeof Header>[0]> = {}) {
     multiCamera: true,
     onSwitchCamera: vi.fn(),
     onClearView: vi.fn(),
+    onExportReport: vi.fn(),
     ...overrides,
   }
   render(<Header {...props} />)
@@ -24,14 +25,21 @@ function openOverflow() {
 }
 
 describe('Header', () => {
-  it('renders brand, status, voice toggle, QR, and LIVE/facing badges', () => {
+  it('renders brand, status, and LIVE/facing badges', () => {
     renderHeader({ status: 'listening' })
     expect(screen.getByText('WRENCHMIND')).toBeInTheDocument()
     expect(screen.getByText('[ 🟢 LISTENING... ]')).toBeInTheDocument()
-    expect(screen.getByRole('switch', { name: 'Voice' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'QR' })).toBeInTheDocument()
     expect(screen.getByText('LIVE')).toBeInTheDocument()
     expect(screen.getByText('REAR CAMERA')).toBeInTheDocument()
+  })
+
+  it('holds the voice toggle and QR behind the overflow', () => {
+    renderHeader()
+    expect(screen.queryByRole('switch', { name: 'Voice mode' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'QR' })).not.toBeInTheDocument()
+    openOverflow()
+    expect(screen.getByRole('switch', { name: 'Voice mode' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'QR' })).toBeInTheDocument()
   })
 
   it('dims the LIVE badge to NO FEED when the camera is off air', () => {
@@ -66,12 +74,14 @@ describe('Header', () => {
 
   it('reports voice toggles through the callback', () => {
     const props = renderHeader()
-    fireEvent.click(screen.getByRole('switch', { name: 'Voice' }))
+    openOverflow()
+    fireEvent.click(screen.getByRole('switch', { name: 'Voice mode' }))
     expect(props.onVoiceToggle).toHaveBeenCalledWith(true)
   })
 
-  it('opens the QR dialog in one tap from the header', () => {
+  it('opens the QR dialog from the overflow', () => {
     renderHeader()
+    openOverflow()
     fireEvent.click(screen.getByRole('button', { name: 'QR' }))
     expect(screen.getByRole('dialog', { name: 'Share via QR code' })).toBeInTheDocument()
   })
@@ -81,10 +91,12 @@ describe('Header', () => {
     expect(screen.queryByText('Logs')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Switch camera' })).not.toBeInTheDocument()
     expect(screen.queryByText('Clear AR View')).not.toBeInTheDocument()
+    expect(screen.queryByText('Export Report')).not.toBeInTheDocument()
     openOverflow()
     expect(screen.getByText('Logs')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Switch camera' })).toBeInTheDocument()
     expect(screen.getByText('Clear AR View')).toBeInTheDocument()
+    expect(screen.getByText('Export Report')).toBeInTheDocument()
   })
 
   it('wires the overflow controls to their callbacks', () => {
@@ -94,6 +106,8 @@ describe('Header', () => {
     expect(props.onSwitchCamera).toHaveBeenCalledTimes(1)
     fireEvent.click(screen.getByText('Clear AR View'))
     expect(props.onClearView).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByText('Export Report'))
+    expect(props.onExportReport).toHaveBeenCalledTimes(1)
   })
 
   it('hides the camera switcher in the overflow with a single camera', () => {

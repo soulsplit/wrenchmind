@@ -11,6 +11,7 @@ import type { SamPointPrompt } from '../services/metaApi'
 import { parseSamStream } from '../services/samParser'
 import { cancelSpeech, speakText } from '../services/speechOutput'
 import { fetchGuidance } from '../services/guidanceApi'
+import { downloadReport } from '../services/report'
 import { VoiceAssistant } from '../services/voiceAssistant'
 import { permissionBlocker, secureContextBlocker } from '../services/mediaSupport'
 import { logDebug, logError, logInfo, logWarn } from '../services/logger'
@@ -18,16 +19,19 @@ import QueryBar from './QueryBar'
 import Header from './Header'
 import HudCard from './HudCard'
 import Sidebar, { useDesktopLayout } from './Sidebar'
+import { useKeyboardShift } from '../hooks/useKeyboardShift'
 
 interface Overlay {
   rec: MaskRecord
   kind: OverlayKind
+  /** Number badge for plural isolations; singular targets stay unlabeled. */
+  label?: string
 }
 
 interface RefreshTarget {
   label: string
-  x: number
-  y: number
+  /** 0-100 viewport points; length > 1 keeps a plural isolation tracking. */
+  points: { x: number; y: number }[]
 }
 
 /** Re-segment cadence while an overlay tracks a moving subject. */
@@ -77,6 +81,21 @@ function calloutStyle(x: number, y: number): { left: string; top: string; transf
   return { left: `${cx}%`, top: `${cy}%`, transform: `translate(${tx}, ${ty})` }
 }
 
+type StepCommand = 'next' | 'prev' | 'repeat'
+
+/**
+ * Hands-free procedure control ("done", "next", "back", "repeat").
+ * Full-phrase match only: anything longer ("show me the next bolt") falls
+ * through to the normal query pipeline.
+ */
+function parseStepCommand(phrase: string): StepCommand | null {
+  const p = phrase.trim().toLowerCase().replace(/[.?!]+$/, '')
+  if (/^(done|next|next step|continue|go on)$/.test(p)) return 'next'
+  if (/^(back|go back|previous|previous step)$/.test(p)) return 'prev'
+  if (/^(repeat|read step|read it again|say again)$/.test(p)) return 'repeat'
+  return null
+}
+
 /** Convert 0-100 viewport coords to media pixels; undefined when dims are unknown. */
 function toPixelPoint(
   ax: number,
@@ -121,6 +140,12 @@ export default function Scanner() {
   const [guidance, setGuidance] = useState<GuidanceResult | null>(null)
   const [guidancePending, setGuidancePending] = useState(false)
   const [stepIndex, setStepIndex] = useState(0)
+  // Ref mirrors so the stable handlePhrase can answer step commands
+  // without re-subscribing the voice lifecycle effect.
+  const guidanceRef = useRef<GuidanceResult | null>(null)
+  guidanceRef.current = guidance
+  const stepIndexRef = useRef(0)
+  stepIndexRef.current = stepIndex
   const [emptyTarget, setEmptyTarget] = useState(false)
   const [offline, setOffline] = useState(
     () => typeof navigator !== 'undefined' && !navigator.onLine,
@@ -130,6 +155,8 @@ export default function Scanner() {
   // hosts the guidance card; the bottom-docked card unmounts to avoid
   // duplicating it.
   const isDesktop = useDesktopLayout()
+  // Keyboard lift: the bottom dock alone rides above the visual viewport.
+  const keyboardShift = useKeyboardShift()
 
   const draw = useCallback((force = false) => {
     const canvas = canvasRef.current
@@ -146,7 +173,7 @@ export default function Scanner() {
     canvas.width = w
     canvas.height = h
     ctx.clearRect(0, 0, canvas.width, canvas.height)
-    for (const { rec, kind } of overlaysRef.current) {
+    for (const { rec, kind, label } of overlaysRef.current) {
       const { box, raster } = rec
       const [r, g, b] = FILL[kind]
       if (raster.length > 0) {
@@ -168,6 +195,18 @@ export default function Scanner() {
       ctx.shadowBlur = 12
       // Box corners are inclusive pixels.
       ctx.strokeRect(box.x1, box.y1, box.x2 - box.x1 + 1, box.y2 - box.y1 + 1)
+      if (label) {
+        ctx.save()
+        ctx.shadowBlur = 0
+        ctx.font = 'bold 24px system-ui, sans-serif'
+        const badgeY = Math.max(28, box.y1 - 4)
+        const badgeW = ctx.measureText(label).width + 16
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.75)'
+        ctx.fillRect(box.x1, badgeY - 28, badgeW, 28)
+        ctx.fillStyle = STROKE[kind]
+        ctx.fillText(label, box.x1 + 8, badgeY - 7)
+        ctx.restore()
+      }
     }
     ctx.shadowBlur = 0
   }, [])
@@ -297,8 +336,11 @@ export default function Scanner() {
     try {
       const img = captureVideoFrame(video)
       if (!img) return
-      const point = toPixelPoint(target.x, target.y, video.videoWidth, video.videoHeight)
-      const recs = await parseSamStream(segmentImage(img, target.label, point))
+      const pixelPts = target.points
+        .map((p) => toPixelPoint(p.x, p.y, video.videoWidth, video.videoHeight))
+        .filter((p): p is SamPointPrompt => p !== undefined)
+      const prompt = pixelPts.length > 1 ? pixelPts : pixelPts[0]
+      const recs = await parseSamStream(segmentImage(img, target.label, prompt))
       if (targetRef.current !== target) return
       const kind = classifyTarget(target.label)
       const spans = recs
@@ -306,7 +348,12 @@ export default function Scanner() {
         .map((r) => `${r.box.x2 - r.box.x1 + 1}x${r.box.y2 - r.box.y1 + 1}`)
         .join(',')
       logDebug('segment', `refresh: ${recs.length} masks [${spans}]`)
-      overlaysRef.current = recs.map((rec) => ({ rec, kind }))
+      const numbered = target.points.length > 1
+      overlaysRef.current = recs.map((rec, i) => ({
+        rec,
+        kind,
+        ...(numbered ? { label: String(i + 1) } : {}),
+      }))
       draw()
     } catch (e) {
       /* keep the previous overlay on transient refresh failures */
@@ -317,8 +364,8 @@ export default function Scanner() {
   }, [draw])
 
   const armRefresh = useCallback(
-    (label: string, x: number, y: number) => {
-      targetRef.current = { label, x, y }
+    (label: string, points: { x: number; y: number }[]) => {
+      targetRef.current = { label, points }
       if (refreshRef.current === null) {
         refreshRef.current = window.setTimeout(() => void tickRefresh(), REFRESH_INTERVAL_MS)
       }
@@ -367,6 +414,31 @@ export default function Scanner() {
         setStatus(voiceOnRef.current ? 'listening' : 'off')
         return
       }
+      // Step commands bypass the API pipeline: no camera frames, no
+      // re-reasoning — the card state plus voice already answer them.
+      const command = parseStepCommand(phrase)
+      const card = guidanceRef.current
+      if (command && card && card.steps.length > 0) {
+        const count = card.steps.length
+        const current = Math.min(Math.max(0, stepIndexRef.current), count - 1)
+        const next =
+          command === 'next'
+            ? Math.min(current + 1, count - 1)
+            : command === 'prev'
+              ? Math.max(current - 1, 0)
+              : current
+        setStepIndex(next)
+        const step = card.steps[next]
+        const finished = command === 'next' && current === count - 1
+        const line = finished
+          ? 'Procedure complete.'
+          : `Step ${next + 1} of ${count}: ${step.title}. ${step.detail}${step.warning ? ` Warning: ${step.warning}` : ''}`
+        logInfo('step', `"${phrase}" → step ${next + 1}/${count}`)
+        setStatus('speaking')
+        await speakText(line)
+        setStatus(voiceOnRef.current ? 'listening' : 'off')
+        return
+      }
       setStatus('analyzing')
       setEmptyTarget(false)
       logInfo('phrase', `"${phrase}"`)
@@ -375,6 +447,9 @@ export default function Scanner() {
         if (frames.length === 0) throw new Error('No video frame')
         logDebug('camera', `burst: ${frames.length} frames`)
         const img = frames[frames.length - 1]
+        // Rolling conversation memory ("phrase -> label (x,y) | ..."): the
+        // inferred job context both calls share. No explicit scoping field —
+        // the tool stays generic across every kind of repair.
         const ctxStr = assistant?.getContextString() ?? ''
         const result = await reasonSpatial(frames, phrase, ctxStr)
         if (!result.target_label) {
@@ -388,14 +463,18 @@ export default function Scanner() {
         }
         if (result.target_label && !trackingRef.current) {
           const kind = classifyTarget(result.target_label)
-          const point = toPixelPoint(
-            result.approx_x,
-            result.approx_y,
-            video.videoWidth,
-            video.videoHeight,
-          )
+          // Plural commands ("all bolts") isolate every instance in one SAM
+          // call; singular targets keep the existing single-point path.
+          const targetPts =
+            result.points && result.points.length > 1
+              ? result.points
+              : [{ x: result.approx_x, y: result.approx_y }]
+          const pixelPts = targetPts
+            .map((p) => toPixelPoint(p.x, p.y, video.videoWidth, video.videoHeight))
+            .filter((p): p is SamPointPrompt => p !== undefined)
+          const prompt = pixelPts.length > 1 ? pixelPts : pixelPts[0]
           const recs = await parseSamStream(
-            segmentImage(img, result.target_label, point),
+            segmentImage(img, result.target_label, prompt),
           )
           const spans = recs
             .slice(0, 3)
@@ -405,7 +484,13 @@ export default function Scanner() {
             'segment',
             `${recs.length} masks [${spans}] in ${video.videoWidth}x${video.videoHeight}`,
           )
-          overlaysRef.current = recs.map((rec) => ({ rec, kind }))
+          const plural = targetPts.length > 1 && recs.length > 1
+          if (plural) logInfo('segment', `isolated ${recs.length} × "${result.target_label}"`)
+          overlaysRef.current = recs.map((rec, i) => ({
+            rec,
+            kind,
+            ...(plural ? { label: String(i + 1) } : {}),
+          }))
           assistant?.pushMemory({
             phrase,
             label: result.target_label,
@@ -413,13 +498,13 @@ export default function Scanner() {
             y: result.approx_y,
           })
           setCallout({
-            label: result.target_label,
+            label: plural ? `${recs.length} × ${result.target_label}` : result.target_label,
             x: result.approx_x,
             y: result.approx_y,
             kind,
           })
           draw()
-          armRefresh(result.target_label, result.approx_x, result.approx_y)
+          armRefresh(result.target_label, targetPts)
           requestGuidance(result.target_label, phrase, ctxStr)
           trackingRef.current = true
           setTracking(true)
@@ -429,7 +514,8 @@ export default function Scanner() {
         // Speak only in speech_and_visual mode with a non-null response.
         // visual_only and null responses stay silent (visual-only).
         if (result.display_mode === 'speech_and_visual' && result.speech_response) {
-          void speakText(result.speech_response)
+          setStatus('speaking')
+          await speakText(result.speech_response)
         }
         setStatus(voiceOnRef.current ? 'listening' : 'off')
       } catch (e) {
@@ -505,6 +591,16 @@ export default function Scanner() {
     resetOverlays()
     logInfo('view', 'AR view cleared')
   }
+  const exportReport = () => {
+    const memory = assistantRef.current?.getMemory() ?? []
+    const workingOn = [...new Set(memory.map((m) => m.label))].slice(-5)
+    downloadReport({
+      guidance: guidanceRef.current,
+      stepIndex: stepIndexRef.current,
+      workingOn,
+    })
+    logInfo('report', 'repair report downloaded')
+  }
 
   const flipCamera = () => {
     // The overlay belongs to the old scene: clear it before switching.
@@ -561,17 +657,20 @@ export default function Scanner() {
         multiCamera={multiCamera}
         onSwitchCamera={flipCamera}
         onClearView={clearOverlay}
+        onExportReport={exportReport}
       />
       {/*
         Bottom dock: error toast, HUD card, and thumb-reachable query input
         stack vertically so nothing can collide at 360px width.
       */}
       <div
-        className="absolute bottom-0 inset-x-0 z-10 flex flex-col gap-2"
+        data-testid="bottom-dock"
+        className="absolute bottom-0 inset-x-0 z-10 flex flex-col gap-2 transition-transform"
         style={{
           paddingBottom: 'max(1rem, env(safe-area-inset-bottom))',
           paddingLeft: 'max(1rem, env(safe-area-inset-left))',
           paddingRight: 'max(1rem, env(safe-area-inset-right))',
+          transform: keyboardShift > 0 ? `translateY(${-keyboardShift}px)` : undefined,
         }}
       >
         {error && (

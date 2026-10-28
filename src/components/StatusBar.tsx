@@ -4,9 +4,9 @@ interface StatusBarProps {
   status: Status
 }
 
-const LABELS: Record<Exclude<Status, 'analyzing'>, string> = {
-  off: '[ OFF ]',
+const LABELS: Record<Exclude<Status, 'analyzing' | 'off'>, string> = {
   listening: '[ 🟢 LISTENING... ]',
+  speaking: '[ 🔊 SPEAKING... ]',
   error: '[ ⚠ ERROR ]',
 }
 
@@ -14,10 +14,11 @@ const LABELS: Record<Exclude<Status, 'analyzing'>, string> = {
  * Inline status pill. Positioning is owned by the parent (the Header badge
  * row); this component only renders the label with its live-region semantics.
  * Renders nothing while analyzing — the dock's Analyzing pill owns that
- * state (visually and for screen readers) to avoid a duplicate indicator.
+ * state (visually and for screen readers) to avoid a duplicate indicator —
+ * and nothing while off (the voice toggle owns that state).
  */
 export default function StatusBar({ status }: StatusBarProps) {
-  if (status === 'analyzing') return null
+  if (status === 'analyzing' || status === 'off') return null
   return (
     <div
       className="bg-black/70 text-white px-3 py-1 rounded-full text-xs font-mono whitespace-nowrap"

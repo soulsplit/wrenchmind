@@ -80,6 +80,23 @@ function clampPct(n: unknown): number {
   return Math.min(100, Math.max(0, n))
 }
 
+/** Max instances isolated per plural command; one SAM call covers all of them. */
+export const MAX_REASON_POINTS = 8
+
+function clampPoints(value: unknown): { x: number; y: number }[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const out: { x: number; y: number }[] = []
+  for (const entry of value) {
+    if (out.length >= MAX_REASON_POINTS) break
+    if (typeof entry !== 'object' || entry === null) continue
+    const { x, y } = entry as { x?: unknown; y?: unknown }
+    if (typeof x !== 'number' || typeof y !== 'number') continue
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue
+    out.push({ x: Math.min(100, Math.max(0, x)), y: Math.min(100, Math.max(0, y)) })
+  }
+  return out.length > 0 ? out : undefined
+}
+
 export async function reasonSpatial(
   images: string | string[],
   phrase: string,
@@ -104,7 +121,7 @@ export async function reasonSpatial(
         {
           role: 'system',
           content:
-            'You are an AR mechanical spatial visualizer. Given an image of a mechanical scene, the user spoken command, and previous context, locate the target. Return ONLY a JSON object: { "target_label": string, "approx_x": number (0-100), "approx_y": number (0-100), "speech_response": string | null, "display_mode": "visual_only" | "speech_and_visual" }.',
+            'You are an AR mechanical spatial visualizer. Given an image of a mechanical scene, the user spoken command, and previous context, locate the target. Return ONLY a JSON object: { "target_label": string, "approx_x": number (0-100), "approx_y": number (0-100), "points": [{ "x": number, "y": number }] (optional, up to 8: every visible instance when the command is plural, e.g. "all bolts" or "every screw"; omit for singular targets), "speech_response": string | null, "display_mode": "visual_only" | "speech_and_visual" }.',
         },
         {
           role: 'user',
@@ -132,6 +149,7 @@ export async function reasonSpatial(
     target_label: typeof parsed.target_label === 'string' ? parsed.target_label : '',
     approx_x: clampPct(parsed.approx_x),
     approx_y: clampPct(parsed.approx_y),
+    points: clampPoints(parsed.points),
     speech_response: typeof parsed.speech_response === 'string' ? parsed.speech_response : null,
     display_mode: parsed.display_mode === 'speech_and_visual' ? 'speech_and_visual' : 'visual_only',
   }
@@ -152,21 +170,27 @@ export interface SamStreamEvent {
 }
 
 /**
- * Segment an image: concept phrase when only a label is known, or a point
- * prompt when the target is already located. Yields raw stream events for
- * the SAM parser; use `parseSamStream` to consume them.
+ * Segment an image: concept phrase when only a label is known, a point
+ * prompt when the target is already located, or one object per point for
+ * plural targets — a single call isolates every instance. Yields raw
+ * stream events for the SAM parser; use `parseSamStream` to consume them.
  */
 export async function* segmentImage(
   imageBase64: string,
   nounPhrase: string,
-  point?: SamPointPrompt,
+  point?: SamPointPrompt | SamPointPrompt[],
 ): AsyncGenerator<SamStreamEvent> {
-  const text = point
-    ? buildObjectPrompt({
-        size: { width: point.width, height: point.height },
-        objects: [{ id: 1, prompts: [{ points: [{ x: point.x, y: point.y }] }] }],
-      })
-    : nounPhrase
+  const pts = Array.isArray(point) ? point : point ? [point] : []
+  const text =
+    pts.length > 0
+      ? buildObjectPrompt({
+          size: { width: pts[0].width, height: pts[0].height },
+          objects: pts.map((p, i) => ({
+            id: i + 1,
+            prompts: [{ points: [{ x: p.x, y: p.y }] }],
+          })),
+        })
+      : nounPhrase
   const res = await fetchWithTimeout(
     `${BASE}/responses`,
     {

@@ -4,9 +4,9 @@ import StatusBar from './StatusBar'
 import type { Status } from '../types'
 
 describe('StatusBar', () => {
-  it.each<[Exclude<Status, 'analyzing'>, string]>([
-    ['off', '[ OFF ]'],
+  it.each<[Exclude<Status, 'analyzing' | 'off'>, string]>([
     ['listening', '[ 🟢 LISTENING... ]'],
+    ['speaking', '[ 🔊 SPEAKING... ]'],
     ['error', '[ ⚠ ERROR ]'],
   ])('renders %s as %s', (status, label) => {
     render(<StatusBar status={status} />)
@@ -16,6 +16,11 @@ describe('StatusBar', () => {
 
   it('renders nothing while analyzing (the dock pill owns that state)', () => {
     const { container } = render(<StatusBar status="analyzing" />)
+    expect(container).toBeEmptyDOMElement()
+  })
+
+  it('renders nothing while off (the voice toggle owns that state)', () => {
+    const { container } = render(<StatusBar status="off" />)
     expect(container).toBeEmptyDOMElement()
   })
 })

@@ -10,6 +10,7 @@ import {
 import { parseSamStream } from '../services/samParser'
 import { fetchGuidance } from '../services/guidanceApi'
 import { cancelSpeech, speakText } from '../services/speechOutput'
+import { useKeyboardShift } from '../hooks/useKeyboardShift'
 import type { SamStreamEvent } from '../services/metaApi'
 import type { VoiceAssistantCallbacks } from '../services/voiceAssistant'
 import type { GuidanceResult, SpatialResult } from '../types'
@@ -54,6 +55,10 @@ vi.mock('../services/speechOutput', () => ({
   cancelSpeech: vi.fn(),
   isSpeaking: vi.fn(),
   getAvailableVoices: vi.fn(),
+}))
+
+vi.mock('../hooks/useKeyboardShift', () => ({
+  useKeyboardShift: vi.fn(() => 0),
 }))
 
 vi.mock('../services/voiceAssistant', () => {
@@ -126,6 +131,7 @@ beforeEach(() => {
   vi.mocked(fetchGuidance).mockReset().mockRejectedValue(new Error('not implemented'))
   vi.mocked(speakText).mockReset().mockResolvedValue(undefined)
   vi.mocked(cancelSpeech).mockReset()
+  vi.mocked(useKeyboardShift).mockReset().mockReturnValue(0)
 })
 
 afterEach(() => {
@@ -137,12 +143,12 @@ describe('Scanner', () => {
     mockCamera(true)
     render(<Scanner />)
     expect(screen.getByText('WRENCHMIND')).toBeInTheDocument()
-    expect(screen.getByText('[ OFF ]')).toBeInTheDocument()
-    expect(screen.getByRole('switch', { name: 'Voice' })).toBeInTheDocument()
+    expect(screen.queryByText('[ OFF ]')).not.toBeInTheDocument()
     expect(await screen.findByText('LIVE')).toBeInTheDocument()
     expect(screen.getByText('REAR CAMERA')).toBeInTheDocument()
     expect(screen.getByLabelText('Query text')).toBeInTheDocument()
     openOverflow()
+    expect(screen.getByRole('switch', { name: 'Voice mode' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Switch camera' })).toBeInTheDocument()
     expect(screen.getByText('Clear AR View')).toBeInTheDocument()
   })
@@ -272,25 +278,29 @@ describe('Scanner', () => {
   it('toggles voice listening through the assistant', async () => {
     mockCamera(true)
     render(<Scanner />)
+    openOverflow()
     const toggle = screen.getByRole('switch')
     fireEvent.click(toggle)
     expect(await screen.findByText('[ 🟢 LISTENING... ]')).toBeInTheDocument()
     expect(assistants[0].start).toHaveBeenCalledTimes(1)
     fireEvent.click(screen.getByRole('switch'))
-    expect(await screen.findByText('[ OFF ]')).toBeInTheDocument()
+    expect(screen.queryByText('[ OFF ]')).not.toBeInTheDocument()
+    expect(screen.getByRole('switch')).toHaveAttribute('aria-checked', 'false')
     expect(assistants[0].stop).toHaveBeenCalledTimes(1)
   })
 
   it('surfaces assistant errors and switches off', async () => {
     mockCamera(true)
     render(<Scanner />)
+    openOverflow()
     fireEvent.click(screen.getByRole('switch'))
     await screen.findByText('[ 🟢 LISTENING... ]')
     act(() => {
       assistants[0].callbacks.onError('Microphone access denied')
     })
     expect(await screen.findByRole('alert')).toHaveTextContent('Microphone access denied')
-    expect(screen.getByText('[ OFF ]')).toBeInTheDocument()
+    expect(screen.queryByText('[ OFF ]')).not.toBeInTheDocument()
+    expect(screen.getByRole('switch')).toHaveAttribute('aria-checked', 'false')
   })
 
   it('runs the phrase pipeline and anchors a callout pill', async () => {
@@ -347,6 +357,15 @@ describe('Scanner', () => {
     const { container } = render(<Scanner />)
     expect(container.querySelector('video')).toHaveClass('object-cover')
     expect(container.querySelector('canvas')).toHaveClass('object-cover')
+  })
+
+  it('lifts the bottom dock above the keyboard', () => {
+    mockCamera(true)
+    vi.mocked(useKeyboardShift).mockReturnValue(120)
+    render(<Scanner />)
+    const dock = screen.getByTestId('bottom-dock')
+    expect(dock).toHaveClass('transition-transform')
+    expect(dock.style.transform).toBe('translateY(-120px)')
   })
 
   it('surfaces a missing API key instead of calling the API', async () => {
@@ -469,6 +488,91 @@ describe('Scanner', () => {
     expect(await screen.findByText('Bolt')).toBeInTheDocument()
   })
 
+  it('advances the guidance step on "done" and speaks the next step', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Screw',
+      approx_x: 10,
+      approx_y: 10,
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    vi.mocked(fetchGuidance).mockResolvedValue(validGuidanceFixture)
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show screws')
+    })
+    expect(await screen.findByText('Remove the belt cover')).toBeInTheDocument()
+    vi.mocked(speakText).mockClear()
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('done')
+    })
+    expect(await screen.findByText('Step 2 of 3')).toBeInTheDocument()
+    expect(screen.getByText('Release belt tension')).toBeInTheDocument()
+    // No re-query: the command is answered locally.
+    expect(reasonSpatial).toHaveBeenCalledTimes(1)
+    expect(speakText).toHaveBeenCalledTimes(1)
+    const spoken = vi.mocked(speakText).mock.calls[0][0] as string
+    expect(spoken).toContain('Step 2 of 3')
+    expect(spoken).toContain('Release belt tension')
+    expect(spoken).toContain('Keep fingers clear of the tensioner spring.')
+  })
+
+  it('"back" and "repeat" navigate without re-querying', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Screw',
+      approx_x: 10,
+      approx_y: 10,
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    vi.mocked(fetchGuidance).mockResolvedValue(validGuidanceFixture)
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show screws')
+    })
+    expect(await screen.findByText('Remove the belt cover')).toBeInTheDocument()
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('next')
+    })
+    expect(await screen.findByText('Step 2 of 3')).toBeInTheDocument()
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('back')
+    })
+    expect(await screen.findByText('Step 1 of 3')).toBeInTheDocument()
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('repeat')
+    })
+    expect(await screen.findByText('Step 1 of 3')).toBeInTheDocument()
+    expect(reasonSpatial).toHaveBeenCalledTimes(1)
+    const calls = vi.mocked(speakText).mock.calls
+    const lastSpoken = calls[calls.length - 1][0] as string
+    expect(lastSpoken).toContain('Step 1 of 3')
+  })
+
+  it('does not hijack phrases that merely contain command words', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Screw',
+      approx_x: 10,
+      approx_y: 10,
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    vi.mocked(fetchGuidance).mockResolvedValue(validGuidanceFixture)
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show screws')
+    })
+    expect(await screen.findByText('Remove the belt cover')).toBeInTheDocument()
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show me the next bolt')
+    })
+    expect(reasonSpatial).toHaveBeenCalledTimes(2)
+    expect(await screen.findByText('Step 1 of 3')).toBeInTheDocument()
+  })
+
   it('unlocks tracking when switching cameras', async () => {
     mockCamera(true)
     vi.mocked(reasonSpatial).mockResolvedValue({
@@ -547,6 +651,167 @@ describe('Scanner', () => {
     expect(reasonSpatial).toHaveBeenCalledWith(['data:image/jpeg;base64,AAA'], 'typed query', '')
   })
 
+  it('isolates every instance for plural commands in one call', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Bolt',
+      approx_x: 50,
+      approx_y: 50,
+      points: [
+        { x: 10, y: 20 },
+        { x: 30, y: 40 },
+        { x: 50, y: 60 },
+      ],
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    vi.mocked(parseSamStream).mockResolvedValueOnce([
+      {
+        frame: 0,
+        ordinal: 0,
+        objectId: '1',
+        box: { x1: 0, y1: 0, x2: 1, y2: 1, w: 2, h: 2 },
+        raster: Uint8Array.from([1, 0, 0, 0]),
+      },
+      {
+        frame: 0,
+        ordinal: 1,
+        objectId: '2',
+        box: { x1: 4, y1: 4, x2: 5, y2: 5, w: 2, h: 2 },
+        raster: Uint8Array.from([1, 0, 0, 0]),
+      },
+      {
+        frame: 0,
+        ordinal: 2,
+        objectId: '3',
+        box: { x1: 8, y1: 8, x2: 9, y2: 9, w: 2, h: 2 },
+        raster: Uint8Array.from([1, 0, 0, 0]),
+      },
+    ])
+    const { container } = render(<Scanner />)
+    const video = container.querySelector('video')
+    if (!video) throw new Error('missing video element')
+    Object.defineProperty(video, 'videoWidth', { value: 640, configurable: true })
+    Object.defineProperty(video, 'videoHeight', { value: 480, configurable: true })
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show all bolts')
+    })
+    expect(await screen.findByText('3 × Bolt')).toBeInTheDocument()
+    expect(segmentImage).toHaveBeenCalledTimes(1)
+    expect(segmentImage).toHaveBeenCalledWith('data:image/jpeg;base64,AAA', 'Bolt', [
+      { x: 64, y: 96, width: 640, height: 480 },
+      { x: 192, y: 192, width: 640, height: 480 },
+      { x: 320, y: 288, width: 640, height: 480 },
+    ])
+    expect(getLogs().some((e) => e.message.includes('isolated 3'))).toBe(true)
+  })
+
+  it('numbers each isolated instance on the canvas', async () => {
+    const fillText = vi.fn()
+    const ctx = new Proxy(
+      { marker: 'ctx', fillText, measureText: () => ({ width: 10 }) },
+      {
+        get: (target, prop) => {
+          if (prop === 'createImageData') {
+            return (w: number, h: number) => ({
+              data: new Uint8ClampedArray(w * h * 4),
+              width: w,
+              height: h,
+            })
+          }
+          const value = (target as Record<PropertyKey, unknown>)[prop]
+          return value ?? (() => undefined)
+        },
+        set: () => true,
+      },
+    )
+    const ctxSpy = vi
+      .spyOn(window.HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue(ctx as unknown as CanvasRenderingContext2D)
+    try {
+      mockCamera(true)
+      vi.mocked(reasonSpatial).mockResolvedValue({
+        target_label: 'Bolt',
+        approx_x: 50,
+        approx_y: 50,
+        points: [
+          { x: 10, y: 20 },
+          { x: 30, y: 40 },
+        ],
+        speech_response: null,
+        display_mode: 'visual_only',
+      })
+      vi.mocked(parseSamStream).mockResolvedValueOnce([
+        {
+          frame: 0,
+          ordinal: 0,
+          objectId: '1',
+          box: { x1: 0, y1: 40, x2: 1, y2: 41, w: 2, h: 2 },
+          raster: Uint8Array.from([1, 0, 0, 0]),
+        },
+        {
+          frame: 0,
+          ordinal: 1,
+          objectId: '2',
+          box: { x1: 4, y1: 40, x2: 5, y2: 41, w: 2, h: 2 },
+          raster: Uint8Array.from([1, 0, 0, 0]),
+        },
+      ])
+      render(<Scanner />)
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('show all bolts')
+      })
+      await screen.findByText('2 × Bolt')
+      expect(fillText).toHaveBeenCalledWith('1', expect.any(Number), expect.any(Number))
+      expect(fillText).toHaveBeenCalledWith('2', expect.any(Number), expect.any(Number))
+    } finally {
+      ctxSpy.mockRestore()
+    }
+  })
+
+  it('keeps plural targets through the refresh loop', async () => {
+    vi.useFakeTimers()
+    try {
+      mockCamera(true)
+      const points = [
+        { x: 10, y: 20 },
+        { x: 30, y: 40 },
+      ]
+      vi.mocked(reasonSpatial).mockResolvedValue({
+        target_label: 'Bolt',
+        approx_x: 50,
+        approx_y: 50,
+        points,
+        speech_response: null,
+        display_mode: 'visual_only',
+      })
+      const { container } = render(<Scanner />)
+      const video = container.querySelector('video')
+      if (!video) throw new Error('missing video element')
+      Object.defineProperty(video, 'videoWidth', { value: 640, configurable: true })
+      Object.defineProperty(video, 'videoHeight', { value: 480, configurable: true })
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('show all bolts')
+      })
+      expect(segmentImage).toHaveBeenCalledTimes(1)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2100)
+      })
+      expect(segmentImage).toHaveBeenCalledTimes(2)
+      const expected = [
+        { x: 64, y: 96, width: 640, height: 480 },
+        { x: 192, y: 192, width: 640, height: 480 },
+      ]
+      expect(vi.mocked(segmentImage).mock.calls[1]).toEqual([
+        'data:image/jpeg;base64,AAA',
+        'Bolt',
+        expected,
+      ])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('re-segments on a cadence while the overlay is active', async () => {
     vi.useFakeTimers()
     try {
@@ -620,6 +885,9 @@ describe('Scanner', () => {
       })
       render(<Scanner />)
       await act(async () => {
+        openOverflow()
+      })
+      await act(async () => {
         fireEvent.click(screen.getByRole('switch'))
       })
       expect(screen.getByText('[ 🟢 LISTENING... ]')).toBeInTheDocument()
@@ -630,7 +898,8 @@ describe('Scanner', () => {
       await act(async () => {
         fireEvent.click(screen.getByRole('switch'))
       })
-      expect(screen.getByText('[ OFF ]')).toBeInTheDocument()
+      expect(screen.queryByText('[ OFF ]')).not.toBeInTheDocument()
+      expect(screen.getByRole('switch')).toHaveAttribute('aria-checked', 'false')
       await act(async () => {
         await vi.advanceTimersByTimeAsync(10000)
       })
@@ -767,6 +1036,37 @@ describe('Scanner', () => {
     expect(speakText).toHaveBeenCalledWith('done')
   })
 
+  it('shows a speaking badge during playback then returns to listening', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Screw',
+      approx_x: 10,
+      approx_y: 10,
+      speech_response: 'done',
+      display_mode: 'speech_and_visual',
+    })
+    let releaseSpeak!: () => void
+    vi.mocked(speakText).mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseSpeak = resolve
+        }),
+    )
+    render(<Scanner />)
+    openOverflow()
+    fireEvent.click(screen.getByRole('switch'))
+    await screen.findByText('[ 🟢 LISTENING... ]')
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('go')
+    })
+    expect(speakText).toHaveBeenCalledWith('done')
+    expect(await screen.findByText('[ 🔊 SPEAKING... ]')).toBeInTheDocument()
+    await act(async () => {
+      releaseSpeak()
+    })
+    expect(await screen.findByText('[ 🟢 LISTENING... ]')).toBeInTheDocument()
+  })
+
   it('stays silent in visual-only mode', async () => {
     mockCamera(true)
     vi.mocked(reasonSpatial).mockResolvedValue({
@@ -789,6 +1089,43 @@ describe('Scanner', () => {
     openOverflow()
     fireEvent.click(screen.getByText('Clear AR View'))
     expect(cancelSpeech).toHaveBeenCalled()
+  })
+
+  it('exports the repair report from the overflow menu', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Belt',
+      approx_x: 10,
+      approx_y: 10,
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    vi.mocked(fetchGuidance).mockResolvedValue(validGuidanceFixture)
+    const captured: { blob: Blob | null } = { blob: null }
+    Object.defineProperty(URL, 'createObjectURL', {
+      value: vi.fn((blob: Blob) => {
+        captured.blob = blob
+        return 'blob:fake'
+      }),
+      configurable: true,
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', { value: vi.fn(), configurable: true })
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show belt')
+    })
+    expect(await screen.findByText('Remove the belt cover')).toBeInTheDocument()
+    assistants[0].getMemory.mockReturnValue([
+      { phrase: 'show belt', label: 'Drive belt', x: 1, y: 2, timestamp: 1 },
+      { phrase: 'show tensioner', label: 'Tensioner', x: 3, y: 4, timestamp: 2 },
+      { phrase: 'show belt again', label: 'Drive belt', x: 1, y: 2, timestamp: 3 },
+    ])
+    openOverflow()
+    fireEvent.click(screen.getByText('Export Report'))
+    await expect(captured.blob?.text()).resolves.toContain('## MID-DRIVE DRIVE BELT')
+    await expect(captured.blob?.text()).resolves.toContain('Working on: Drive belt, Tensioner')
+    expect(getLogs().some((e) => e.message.includes('repair report downloaded'))).toBe(true)
   })
 
   it('stops speech on unmount', async () => {
@@ -837,7 +1174,7 @@ describe('Scanner', () => {
       true,
     )
     expect(segmentImage).not.toHaveBeenCalled()
-    expect(screen.getByText('[ OFF ]')).toBeInTheDocument()
+    expect(screen.queryByText('[ OFF ]')).not.toBeInTheDocument()
   })
 
   it('shows an error when no frame is captured', async () => {
@@ -1048,6 +1385,7 @@ describe('Scanner', () => {
     mockCamera(true)
     vi.mocked(reasonSpatial).mockRejectedValue(new Error('network down'))
     render(<Scanner />)
+    openOverflow()
     fireEvent.click(screen.getByRole('switch'))
     await screen.findByText('[ 🟢 LISTENING... ]')
     await act(async () => {

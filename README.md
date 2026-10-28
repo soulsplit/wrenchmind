@@ -1,34 +1,16 @@
 # WrenchMind PWA
 
-Hands-free AR mechanical diagnostic assistant. Technicians ask natural spatial
-questions ("Show me the blend door", "Where is the electrical connection?")
-while working. The app streams the device camera plus continuous voice,
-isolates target features via Meta SAM 3.1, reasons via Meta Muse Spark, and
-responds with visual overlays and voice synthesis.
+> They talk about your engine. WrenchMind points at it.
 
-## Features
+What it does:
 
-- Full-viewport camera viewfinder with transparent AR canvas and front/back
-  camera switcher (auto-hidden on single-camera devices)
-- Continuous voice loop with exponential-backoff restarts, plus a text query
-  bar that runs the same pipeline (noisy shops, unsupported browsers)
-- Multi-frame bursts per query and a re-segmentation loop so highlights track
-  moving subjects
-- Neon-coded overlays (cyan = components, yellow = connectors, red =
-  fasteners/screws) with floating callout pills and brief voice confirmations
-- In-app log with copy/download, QR code sharing of the hosted URL, and
-  precise camera/microphone failure diagnostics
+- Point the phone camera at an engine, ask a plain question ("show me the
+  blend door"), get an AR outline on the part plus a short spoken answer.
+- Each identified part gets a repair card: steps with cautions, specs, tools,
+  warnings, and manual/source links.
+- Hands-free voice loop with a typed query bar that runs the same pipeline.
 
-## Stack
-
-- React 18 + Vite + TypeScript (strict) + Tailwind CSS
-- Meta Model API: `muse-spark-1.3` (reasoning), `sam-3.1` (segmentation)
-  parsed with the official `@meta-sam/parser` library
-- Browser APIs only: `getUserMedia`, `SpeechRecognition` /
-  `webkitSpeechRecognition`, `speechSynthesis`, `fetch`
-- No custom backend. Tests with Vitest + Testing Library + happy-dom.
-
-## Develop
+## Quickstart (local)
 
 ```sh
 cp .env.example .env   # then set VITE_META_MODEL_API_KEY
@@ -36,106 +18,58 @@ npm ci
 npm run dev            # http://localhost:5173/wrenchmind/
 ```
 
-| Script        | Purpose                              |
-| ------------- | ------------------------------------ |
-| `npm run dev` | Dev server with hot reload           |
-| `npm test`    | Vitest suite (once, no watch)        |
-| `npm run lint`| ESLint over the repo                |
-| `npm run build` | Typecheck (`tsc -b`) + production build |
-| `npm run preview` | Serve `dist/` locally              |
-
-## Deploy
-
-Pushing to `main` builds and deploys to GitHub Pages via
-`.github/workflows/deploy.yml` (builds with `npm ci`, runs tests, uploads
-`dist/`). The app is served from the `/wrenchmind/` base path. For a first
-push from this checkout:
+Phone testing: camera and mic need HTTPS or localhost, so plain LAN HTTP
+never prompts. Point a tunnel at the dev server:
 
 ```sh
-git remote add origin git@github.com:<you>/wrenchmind.git
-git push -u origin main
+cloudflared tunnel --url http://localhost:5173
 ```
 
-then enable Pages with the **GitHub Actions** source in the repo settings.
+Open the printed `https://...trycloudflare.com/wrenchmind/` URL on the
+phone (dev accepts `*.trycloudflare.com` hosts). Or open that URL on the
+desktop too and scan the in-app QR code (header menu) with the phone.
 
-## CI
+## Run from GitHub
 
-`.github/workflows/deploy.yml` runs three jobs: `validate` (lint, tests with
-coverage report, production build) on every push and pull request — no secret
-needed; `deploy` on `main` only, building with the `VITE_META_MODEL_API_KEY`
-repo secret and publishing `dist/` to Pages; `smoke` curls the live Pages URL
-and fails if the app shell isn't served. Set the secret at Settings →
-Secrets and variables → Actions before the first push (the deploy job fails
-with instructions if it's missing). Pinned runtime: Node 18
-(`.nvmrc`, `engines`, workflow).
+Pushing to `main` validates (lint, tests, build), then deploys `dist/` to
+GitHub Pages at `https://<you>.github.io/wrenchmind/`. Before the first
+push, add the repo secret `VITE_META_MODEL_API_KEY` at Settings →
+Secrets and variables → Actions (the deploy job fails if it is missing),
+and enable Pages with the **GitHub Actions** source in repo settings.
 
-## How it works
+## Features
 
-1. `Scanner` shows the rear camera full-viewport with a transparent AR canvas.
-   The canvas shares the video's `object-cover` geometry, so frame-pixel masks
-   stay aligned with the feed. The Switch camera button flips facing (hidden
-   when only one camera exists) and clears the stale overlay.
-2. Enabling the voice toggle starts a continuous recognition loop
-   (`voiceAssistant`) with exponential-backoff restarts and a bounded retry cap.
-   The bottom query bar (`QueryBar`) sends typed text through the same pipeline.
-3. Each phrase captures a burst of frames (`FRAME_BURST = 3`, 300 ms apart) and
-   sends them with the phrase plus rolling memory (recent commands + resolved
-   labels/coords) to Muse Spark, which returns `{ target_label, approx_x,
-   approx_y, speech_response, display_mode }`.
-4. The latest frame goes to SAM 3.1 with a point prompt in the documented
-   token grammar (or the bare noun phrase when the position is unknown).
-   Boxes shrink to the tight bounds of set mask pixels before rendering.
-5. While an overlay is active, the latest frame is re-segmented every 2 s
-   (`REFRESH_INTERVAL_MS`) so the highlight tracks moving subjects. The loop
-   pauses during analysis and stops on Clear, camera switch, voice-off, or
-   unmount.
-6. `visual_only` and `speech_response: null` stay silent; `speech_and_visual`
-   also speaks a brief confirmation. "Clear AR View" erases masks and memory.
-7. The **QR** button (top left) shows a scannable code for the current page URL
-   with a warning when the URL isn't phone-reachable (localhost/HTTP).
+- Full-viewport camera feed with transparent AR canvas; front/back switcher
+  hides itself on single-camera devices.
+- Color-coded overlays (cyan = component, yellow = connector, red =
+  fastener) with callout pills; plural queries ("all the bolts") isolate
+  every instance with numbered outlines. Overlays re-segment every 2 s so
+  they track moving subjects.
+- Voice mode toggle with continuous recognition; "done", "back", "repeat"
+  step through the repair card hands-free. Once locked on, follow-ups
+  answer by voice without re-marking.
+- Repair guidance card: step n-of-m with Back / Next Step buttons, specs
+  (always flagged "verify against the manual"), tools, a warnings slot
+  that always renders, manual title, and source links. "Scan Another Part"
+  resets for the next part.
+- One-tap markdown repair-report export (steps with progress, specs,
+  warnings, sources, session log) and an in-app log with copy/download.
+- Header badges: LIVE / NO FEED, front/rear camera, tracking lock, and
+  status. Missing API key and camera/mic failures surface as plain-text
+  errors with fixes.
 
-## Project layout
+| Script            | Purpose                               |
+| ----------------- | ------------------------------------- |
+| `npm run dev`     | Dev server with hot reload (`--host`) |
+| `npm test`        | Vitest suite, single run              |
+| `npm run lint`    | ESLint over the repo                  |
+| `npm run build`   | Typecheck (`tsc -b`) + Vite build     |
+| `npm run preview` | Serve `dist/` locally (`--host`)      |
 
-```text
-src/
-  components/   Scanner, StatusBar, Toggle, QueryBar, LogPanel, QrShare
-  services/     metaApi, samParser, voiceAssistant, logger, mediaSupport
-  types.ts      Shared result/mask/status types
-```
+## Testing
 
-## Mobile testing
-
-Camera and microphone require a secure context: mobile browsers never prompt
-on plain `http://` LAN URLs, so `vite --host` alone is not enough. Use one of:
-
-- Deploy to GitHub Pages (HTTPS, stable, installable), or
-- Point a tunnel at the dev server, e.g. `cloudflared tunnel --url
-  http://localhost:5173`, and open the printed `https://` URL on the phone
-  (dev allows `*.trycloudflare.com` hosts).
-
-Then open the phone-reachable URL in the desktop browser too and scan the
-in-app QR code to open the same page on the phone.
-
-Notes: iOS Safari has no SpeechRecognition, so voice is unavailable there —
-the text query bar is the fallback. If a permission was previously blocked for
-the site, the browser won't prompt again; the app says so and it must be
-re-enabled in the browser's site settings.
-
-## Debugging
-
-The **Logs** button (top left) opens a live in-app log with Copy, Download
-(`wrenchmind-<timestamp>.log`), and Clear actions. Entries also mirror to the
-browser devtools console. Logged events include camera selection/failures,
-voice lifecycle and restart backoff, phrase pipeline stages with box spans,
-and API errors with HTTP statuses and server messages. API keys and image
-payloads are never logged.
-
-## Security & privacy
-
-- The Meta API key is read only from `import.meta.env.VITE_META_MODEL_API_KEY`
-  and is never hardcoded or logged. `.env` is git-ignored; never commit it.
-- Note: this is a client-side PWA, so the key is necessarily exposed to the
-  browser. Treat it as a publishable key, scope/restrict it server-side where
-  possible, and rotate it if abused.
-- Camera and microphone are requested explicitly; denials surface as visible
-  error states with actionable diagnostics.
+`npm test` runs the Vitest suite once. For device testing, use the HTTPS
+tunnel above or the Pages deploy — never plain-HTTP LAN. If a permission
+was previously blocked for the site, the browser will not prompt again;
+re-enable it in the browser's site settings. Where speech recognition is
+unavailable, the text query bar is the fallback.
