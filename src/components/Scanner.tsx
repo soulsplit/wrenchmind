@@ -16,6 +16,7 @@ import { logDebug, logError, logInfo, logWarn } from '../services/logger'
 import QueryBar from './QueryBar'
 import Header from './Header'
 import HudCard from './HudCard'
+import Sidebar, { useDesktopLayout } from './Sidebar'
 
 interface Overlay {
   rec: MaskRecord
@@ -52,6 +53,27 @@ function classifyTarget(label: string): OverlayKind {
     return 'fastener'
   }
   return 'component'
+}
+
+/** Clamp a 0-100 viewport percent into range; non-finite values anchor at 0. */
+function clampPct(value: number): number {
+  if (!Number.isFinite(value)) return 0
+  return Math.min(100, Math.max(0, value))
+}
+
+/**
+ * Edge-collision placement for callout pills: pills near the left/right edges
+ * anchor inward (a left-edge pill grows rightward from its point, a right-edge
+ * pill grows leftward) instead of centering off-viewport, and pills near the
+ * top drop below their point instead of clipping under the header. Long
+ * labels are additionally ellipsized by the pill's own max-width.
+ */
+function calloutStyle(x: number, y: number): { left: string; top: string; transform: string } {
+  const cx = clampPct(x)
+  const cy = clampPct(y)
+  const tx = cx < 20 ? '0' : cx > 80 ? '-100%' : '-50%'
+  const ty = cy < 25 ? '8px' : 'calc(-100% - 8px)'
+  return { left: `${cx}%`, top: `${cy}%`, transform: `translate(${tx}, ${ty})` }
 }
 
 /** Convert 0-100 viewport coords to media pixels; undefined when dims are unknown. */
@@ -98,7 +120,15 @@ export default function Scanner() {
   const [guidance, setGuidance] = useState<GuidanceResult | null>(null)
   const [guidancePending, setGuidancePending] = useState(false)
   const [stepIndex, setStepIndex] = useState(0)
+  const [emptyTarget, setEmptyTarget] = useState(false)
+  const [offline, setOffline] = useState(
+    () => typeof navigator !== 'undefined' && !navigator.onLine,
+  )
   const guidanceReqRef = useRef(0)
+  // Desktop layout branch (lg+): the feed narrows to 2/3 and the sidebar
+  // hosts the guidance card; the bottom-docked card unmounts to avoid
+  // duplicating it.
+  const isDesktop = useDesktopLayout()
 
   const draw = useCallback((force = false) => {
     const canvas = canvasRef.current
@@ -132,10 +162,13 @@ export default function Scanner() {
         ctx.putImageData(img, box.x1, box.y1)
       }
       ctx.strokeStyle = STROKE[kind]
-      ctx.lineWidth = 2
+      ctx.lineWidth = 3
+      ctx.shadowColor = STROKE[kind]
+      ctx.shadowBlur = 12
       // Box corners are inclusive pixels.
       ctx.strokeRect(box.x1, box.y1, box.x2 - box.x1 + 1, box.y2 - box.y1 + 1)
     }
+    ctx.shadowBlur = 0
   }, [])
 
   // Surface a missing API key up front instead of failing per phrase.
@@ -143,6 +176,17 @@ export default function Scanner() {
     if (!hasApiKey()) {
       logError('config', 'missing VITE_META_MODEL_API_KEY')
       setError('API key missing: set VITE_META_MODEL_API_KEY in .env')
+    }
+  }, [])
+
+  // Offline banner: reflect connectivity loss without touching the pipeline.
+  useEffect(() => {
+    const sync = () => setOffline(!navigator.onLine)
+    window.addEventListener('online', sync)
+    window.addEventListener('offline', sync)
+    return () => {
+      window.removeEventListener('online', sync)
+      window.removeEventListener('offline', sync)
     }
   }, [])
 
@@ -312,6 +356,7 @@ export default function Scanner() {
         return
       }
       setStatus('analyzing')
+      setEmptyTarget(false)
       logInfo('phrase', `"${phrase}"`)
       try {
         const frames = await captureFrameBurst(video)
@@ -322,6 +367,7 @@ export default function Scanner() {
         const result = await reasonSpatial(frames, phrase, ctxStr)
         if (!result.target_label) {
           logWarn('reason', 'no target in response')
+          setEmptyTarget(true)
         } else {
           logInfo(
             'reason',
@@ -422,6 +468,7 @@ export default function Scanner() {
     assistantRef.current?.clearMemory()
     clearRefresh()
     setCallout(null)
+    setEmptyTarget(false)
     // Invalidate any in-flight guidance fetch and drop the HUD card.
     guidanceReqRef.current += 1
     setGuidance(null)
@@ -447,12 +494,15 @@ export default function Scanner() {
   }
 
   return (
-    <div className="relative w-full h-dvh overflow-hidden bg-black">
+    <div className="relative w-full h-dvh overflow-hidden bg-black lg:flex">
+      {/* Feed pane: overlay master at every size; narrows to 2/3 on desktop. */}
+      <div className="relative h-full w-full lg:w-auto lg:min-w-0 lg:flex-1">
       <video
         ref={videoRef}
         autoPlay
         playsInline
         muted
+        aria-label="Live camera feed"
         className="absolute inset-0 w-full h-full object-cover"
       />
       {/*
@@ -461,16 +511,22 @@ export default function Scanner() {
       */}
       <canvas
         ref={canvasRef}
+        aria-hidden="true"
         className="absolute inset-0 w-full h-full object-cover pointer-events-none"
       />
       {callout && (
         <div
-          className="absolute -translate-x-1/2 -translate-y-full bg-black/80 text-white px-3 py-1.5 rounded-full text-sm font-semibold whitespace-nowrap pointer-events-none"
-          style={{ left: `${callout.x}%`, top: `${callout.y}%` }}
+          role="status"
+          aria-label={`Located: ${callout.label}`}
+          className="absolute bg-black/80 backdrop-blur-md border border-white/20 text-white px-3 py-1.5 rounded-full text-sm font-semibold whitespace-nowrap overflow-hidden text-ellipsis max-w-[calc(100vw-1rem)] shadow-lg pointer-events-none"
+          style={calloutStyle(callout.x, callout.y)}
         >
           <span
             className="inline-block w-2.5 h-2.5 rounded-full mr-2 align-middle"
-            style={{ backgroundColor: STROKE[callout.kind] }}
+            style={{
+              backgroundColor: STROKE[callout.kind],
+              boxShadow: `0 0 6px ${STROKE[callout.kind]}`,
+            }}
           />
           {callout.label}
         </div>
@@ -497,11 +553,78 @@ export default function Scanner() {
         }}
       >
         {error && (
-          <div className="bg-red-600 text-white px-4 py-2 rounded-lg text-sm" role="alert">
-            {error}
+          <div
+            role="alert"
+            className="w-full rounded-xl bg-black/80 backdrop-blur-md border border-red-500/60 px-4 py-2 flex items-center gap-3"
+          >
+            <span
+              aria-hidden="true"
+              className="motion-safe:animate-pulse inline-block h-2.5 w-2.5 shrink-0 rounded-full bg-red-500"
+            />
+            <p className="flex-1 min-w-0 text-sm font-medium text-white">{error}</p>
+            <button
+              type="button"
+              onClick={() => setError('')}
+              aria-label="Dismiss error"
+              className="min-h-[48px] min-w-[48px] shrink-0 rounded-lg px-3 text-lg font-bold leading-none text-white/80 active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+            >
+              <span aria-hidden="true">✕</span>
+            </button>
           </div>
         )}
-        {(guidancePending || guidance) && (
+        {offline && (
+          <div
+            role="status"
+            aria-label="You're offline — connect to analyze the feed and fetch guidance."
+            className="w-full rounded-xl bg-black/80 backdrop-blur-md border border-amber-400/60 px-4 py-2.5 flex items-center gap-3"
+          >
+            <span
+              aria-hidden="true"
+              className="inline-block h-2.5 w-2.5 shrink-0 rounded-full bg-amber-400"
+            />
+            <p className="flex-1 min-w-0 text-sm font-medium text-white">
+              You&apos;re offline — connect to analyze the feed and fetch guidance.
+            </p>
+          </div>
+        )}
+        {emptyTarget && !error && (
+          <div
+            role="status"
+            aria-label="No matching part found — try rephrasing or moving closer."
+            className="w-full rounded-xl bg-black/80 backdrop-blur-md border border-white/20 px-4 py-2 flex items-center gap-3"
+          >
+            <span
+              aria-hidden="true"
+              className="inline-block h-2.5 w-2.5 shrink-0 rounded-full bg-cyan-300"
+            />
+            <p className="flex-1 min-w-0 text-sm font-medium text-white">
+              No matching part found — try rephrasing or moving closer.
+            </p>
+            <button
+              type="button"
+              onClick={() => setEmptyTarget(false)}
+              aria-label="Dismiss notice"
+              className="min-h-[48px] min-w-[48px] shrink-0 rounded-lg px-3 text-lg font-bold leading-none text-white/80 active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+            >
+              <span aria-hidden="true">✕</span>
+            </button>
+          </div>
+        )}
+        {/*
+          Visual-only processing echo: the Header status badge owns the
+          screen-reader announcement, so this stays aria-hidden to avoid a
+          double announcement. Motion is gated behind motion-safe.
+        */}
+        {status === 'analyzing' && (
+          <div
+            aria-hidden="true"
+            className="pointer-events-none self-start inline-flex items-center gap-2 rounded-full bg-black/70 px-3 py-1.5 text-xs font-semibold text-white"
+          >
+            <span className="motion-safe:animate-pulse inline-block h-2 w-2 rounded-full bg-cyan-300" />
+            Analyzing…
+          </div>
+        )}
+        {(guidancePending || guidance) && !isDesktop && (
           <HudCard
             guidance={guidance}
             pending={guidancePending}
@@ -512,6 +635,16 @@ export default function Scanner() {
         )}
         <QueryBar onSubmit={(text) => void handlePhrase(text)} />
       </div>
+      </div>
+      {isDesktop && (
+        <Sidebar
+          guidance={guidance}
+          pending={guidancePending}
+          stepIndex={stepIndex}
+          onStepChange={changeStep}
+          onScanAnother={clearOverlay}
+        />
+      )}
     </div>
   )
 }

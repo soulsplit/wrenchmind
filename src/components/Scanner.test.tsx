@@ -996,3 +996,215 @@ describe('Scanner', () => {
     expect(assistants[0].clearMemory).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('Scanner states (Wave 3)', () => {
+  async function phraseWithTarget(label: string, x: number, y: number): Promise<HTMLElement> {
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: label,
+      approx_x: x,
+      approx_y: y,
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('go')
+    })
+    return screen.findByText(label)
+  }
+
+  function styleAttr(element: HTMLElement): string {
+    return element.getAttribute('style') ?? ''
+  }
+
+  it('clamps left-edge callout pills so they never overflow the viewport', async () => {
+    mockCamera(true)
+    const pill = await phraseWithTarget('Edge screw', 2, 60)
+    expect(pill).toHaveClass('backdrop-blur-md', 'rounded-full')
+    expect(styleAttr(pill)).toContain('left: 2%')
+    expect(styleAttr(pill)).toContain('translate(0, calc(-100% - 8px))')
+  })
+
+  it('clamps right-edge callout pills so they never overflow the viewport', async () => {
+    mockCamera(true)
+    const pill = await phraseWithTarget('Far connector', 98, 60)
+    expect(styleAttr(pill)).toContain('left: 98%')
+    expect(styleAttr(pill)).toContain('translate(-100%, calc(-100% - 8px))')
+  })
+
+  it('drops top-edge callout pills below their point', async () => {
+    mockCamera(true)
+    const pill = await phraseWithTarget('High bolt', 50, 5)
+    expect(styleAttr(pill)).toContain('top: 5%')
+    expect(styleAttr(pill)).toContain('translate(-50%, 8px)')
+  })
+
+  it('centers mid-viewport callout pills above their point', async () => {
+    mockCamera(true)
+    const pill = await phraseWithTarget('Blend door', 40, 60)
+    expect(styleAttr(pill)).toContain('left: 40%')
+    expect(styleAttr(pill)).toContain('translate(-50%, calc(-100% - 8px))')
+  })
+
+  it('announces callouts through a status region', async () => {
+    mockCamera(true)
+    await phraseWithTarget('Blend door', 40, 60)
+    expect(screen.getByRole('status', { name: 'Located: Blend door' })).toBeInTheDocument()
+  })
+
+  it('paints neon outlines while keeping per-kind colors', async () => {
+    const writes: Array<[string, unknown]> = []
+    const ctx = new Proxy(
+      { marker: 'ctx' },
+      {
+        get: (target, prop) => {
+          if (prop === 'createImageData') {
+            return (w: number, h: number) => ({
+              data: new Uint8ClampedArray(w * h * 4),
+              width: w,
+              height: h,
+            })
+          }
+          return (target as Record<PropertyKey, unknown>)[prop] ?? (() => undefined)
+        },
+        set: (_target, prop, value) => {
+          writes.push([String(prop), value])
+          return true
+        },
+      },
+    )
+    const ctxSpy = vi
+      .spyOn(window.HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue(ctx as unknown as CanvasRenderingContext2D)
+    try {
+      mockCamera(true)
+      vi.mocked(parseSamStream).mockResolvedValueOnce([
+        {
+          frame: 0,
+          ordinal: 0,
+          objectId: '0',
+          box: { x1: 0, y1: 0, x2: 1, y2: 1, w: 2, h: 2 },
+          raster: Uint8Array.from([1, 0, 0, 0]),
+        },
+      ])
+      await phraseWithTarget('Electrical connector', 40, 60)
+      expect(writes).toContainEqual(['lineWidth', 3])
+      expect(writes).toContainEqual(['shadowColor', '#ffff00'])
+      expect(writes).toContainEqual(['shadowBlur', 12])
+      expect(writes).toContainEqual(['strokeStyle', '#ffff00'])
+    } finally {
+      ctxSpy.mockRestore()
+    }
+  })
+
+  it('dismisses the error dock through a 48px focus-visible target', async () => {
+    mockCamera(false)
+    render(<Scanner />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('Camera access denied')
+    const dismiss = screen.getByRole('button', { name: 'Dismiss error' })
+    expect(dismiss).toHaveClass('min-h-[48px]', 'min-w-[48px]')
+    expect(dismiss.className).toContain('focus-visible:ring-2')
+    fireEvent.click(dismiss)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('shows an offline banner that clears on reconnect', async () => {
+    const original = Object.getOwnPropertyDescriptor(navigator, 'onLine')
+    Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
+    try {
+      mockCamera(true)
+      render(<Scanner />)
+      expect(await screen.findByText(/You're offline/)).toBeInTheDocument()
+      expect(screen.getByRole('status', { name: /offline/i })).toBeInTheDocument()
+      Object.defineProperty(navigator, 'onLine', { value: true, configurable: true })
+      act(() => {
+        window.dispatchEvent(new window.Event('offline'))
+        window.dispatchEvent(new window.Event('online'))
+      })
+      await waitFor(() => {
+        expect(screen.queryByText(/You're offline/)).not.toBeInTheDocument()
+      })
+    } finally {
+      if (original) {
+        Object.defineProperty(navigator, 'onLine', original)
+      } else {
+        delete (navigator as unknown as Record<string, unknown>)['onLine']
+      }
+    }
+  })
+
+  it('shows an empty-target notice when reasoning finds nothing', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: '',
+      approx_x: 0,
+      approx_y: 0,
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('nothing here')
+    })
+    expect(await screen.findByText(/No matching part found/)).toBeInTheDocument()
+    expect(screen.getByRole('status', { name: /No matching part/ })).toBeInTheDocument()
+  })
+
+  it('clears the empty-target notice on the next successful scan', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial)
+      .mockResolvedValueOnce({
+        target_label: '',
+        approx_x: 0,
+        approx_y: 0,
+        speech_response: null,
+        display_mode: 'visual_only',
+      })
+      .mockResolvedValueOnce({
+        target_label: 'Screw',
+        approx_x: 10,
+        approx_y: 10,
+        speech_response: null,
+        display_mode: 'visual_only',
+      })
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('nothing here')
+    })
+    expect(await screen.findByText(/No matching part found/)).toBeInTheDocument()
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show screws')
+    })
+    expect(await screen.findByText('Screw')).toBeInTheDocument()
+    expect(screen.queryByText(/No matching part found/)).not.toBeInTheDocument()
+  })
+
+  it('shows a motion-safe analyzing indicator while reasoning is in flight', async () => {
+    mockCamera(true)
+    let release!: (value: SpatialResult) => void
+    vi.mocked(reasonSpatial).mockImplementationOnce(
+      () =>
+        new Promise<SpatialResult>((resolve) => {
+          release = resolve
+        }),
+    )
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('go')
+    })
+    const indicator = screen.getByText('Analyzing…')
+    expect(indicator).toBeInTheDocument()
+    expect(indicator.querySelector('span')).toHaveClass('motion-safe:animate-pulse')
+    await act(async () => {
+      release({
+        target_label: 'Screw',
+        approx_x: 10,
+        approx_y: 10,
+        speech_response: null,
+        display_mode: 'visual_only',
+      })
+    })
+    expect(await screen.findByText('Screw')).toBeInTheDocument()
+    expect(screen.queryByText('Analyzing…')).not.toBeInTheDocument()
+  })
+})
