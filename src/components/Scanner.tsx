@@ -2,7 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Callout, GuidanceResult, MaskRecord, OverlayKind, Status } from '../types'
 import {
   captureFrameBurst,
+  captureThumbnail,
   captureVideoFrame,
+  extractLabelText,
   hasApiKey,
   reasonSpatial,
   segmentImage,
@@ -11,7 +13,7 @@ import type { SamPointPrompt } from '../services/metaApi'
 import { parseSamStream } from '../services/samParser'
 import { cancelSpeech, speakText } from '../services/speechOutput'
 import { fetchGuidance } from '../services/guidanceApi'
-import { downloadReport } from '../services/report'
+import { downloadReport, shareReport } from '../services/report'
 import { VoiceAssistant } from '../services/voiceAssistant'
 import { permissionBlocker, secureContextBlocker } from '../services/mediaSupport'
 import { logDebug, logError, logInfo, logWarn } from '../services/logger'
@@ -96,6 +98,17 @@ function parseStepCommand(phrase: string): StepCommand | null {
   return null
 }
 
+/**
+ * Label-read queries ("read this label", "what does this say").
+ * Full-phrase match only, like step commands: longer sentences fall
+ * through to the normal spatial pipeline.
+ */
+function isLabelQuery(phrase: string): boolean {
+  return /^(read (this|the) label|read this|what does (this|the label) say)\??$/i.test(
+    phrase.trim(),
+  )
+}
+
 /** Convert 0-100 viewport coords to media pixels; undefined when dims are unknown. */
 function toPixelPoint(
   ax: number,
@@ -137,6 +150,9 @@ export default function Scanner() {
   const [multiCamera, setMultiCamera] = useState(true)
   const [cameraLive, setCameraLive] = useState(false)
   const [actualFacing, setActualFacing] = useState<'environment' | 'user' | 'unknown'>('unknown')
+  const [findings, setFindings] = useState<string[]>([])
+  /** Photo checkpoint per completed step index; pinned on advance, cleared per job. */
+  const [stepPhotos, setStepPhotos] = useState<Record<number, string>>({})
   const [guidance, setGuidance] = useState<GuidanceResult | null>(null)
   const [guidancePending, setGuidancePending] = useState(false)
   const [stepIndex, setStepIndex] = useState(0)
@@ -387,6 +403,7 @@ export default function Scanner() {
         if (guidanceReqRef.current !== reqId) return
         setGuidance(result)
         setStepIndex(0)
+        setStepPhotos({})
         logInfo('guidance', `"${result.title}" (${result.steps.length} steps)`)
       },
       (e: unknown) => {
@@ -428,6 +445,15 @@ export default function Scanner() {
               ? Math.max(current - 1, 0)
               : current
         setStepIndex(next)
+        // Proof-of-work: pin a thumbnail to the step just finished. Back and
+        // repeat re-read without producing evidence.
+        if (command === 'next') {
+          const shot = captureThumbnail(video)
+          if (shot) {
+            setStepPhotos((prev) => ({ ...prev, [current]: shot }))
+            logInfo('photo', `checkpoint pinned to step ${current + 1}`)
+          }
+        }
         const step = card.steps[next]
         const finished = command === 'next' && current === count - 1
         const line = finished
@@ -437,6 +463,34 @@ export default function Scanner() {
         setStatus('speaking')
         await speakText(line)
         setStatus(voiceOnRef.current ? 'listening' : 'off')
+        return
+      }
+      // Label reads bypass spatial reasoning: one frame, one transcription
+      // call, findings shown as chips, spoken, and filed for the report.
+      if (isLabelQuery(phrase)) {
+        setStatus('analyzing')
+        setEmptyTarget(false)
+        logInfo('phrase', `"${phrase}"`)
+        try {
+          const frame = captureVideoFrame(video)
+          if (!frame) throw new Error('No video frame')
+          const found = await extractLabelText(frame)
+          if (found.length === 0) {
+            logInfo('label', 'no legible markings')
+            setStatus('speaking')
+            await speakText('I could not read any markings. Try moving closer.')
+          } else {
+            setFindings(found)
+            logInfo('label', `${found.length} markings: ${found.slice(0, 3).join('; ')}`)
+            setStatus('speaking')
+            await speakText(`Label reads: ${found.join('. ')}`)
+          }
+          setStatus(voiceOnRef.current ? 'listening' : 'off')
+        } catch (e) {
+          logError('label', e instanceof Error ? e.message : String(e))
+          setStatus('error')
+          window.setTimeout(() => setStatus(voiceOnRef.current ? 'listening' : 'off'), 2000)
+        }
         return
       }
       setStatus('analyzing')
@@ -568,6 +622,8 @@ export default function Scanner() {
 
   const resetOverlays = () => {
     overlaysRef.current = []
+    setFindings([])
+    setStepPhotos({})
     assistantRef.current?.clearMemory()
     clearRefresh()
     cancelSpeech()
@@ -594,12 +650,26 @@ export default function Scanner() {
   const exportReport = () => {
     const memory = assistantRef.current?.getMemory() ?? []
     const workingOn = [...new Set(memory.map((m) => m.label))].slice(-5)
-    downloadReport({
+    const photos = Object.entries(stepPhotos)
+      .map(([step, dataUrl]) => ({ step: Number(step), dataUrl }))
+      .sort((a, b) => a.step - b.step)
+    const input = {
       guidance: guidanceRef.current,
       stepIndex: stepIndexRef.current,
       workingOn,
-    })
-    logInfo('report', 'repair report downloaded')
+      findings,
+      photos,
+    }
+    // Prefer the OS share sheet; download when sharing is unavailable
+    // or the user dismisses it.
+    void (async () => {
+      if (await shareReport(input)) {
+        logInfo('report', 'repair report shared')
+      } else {
+        downloadReport(input)
+        logInfo('report', 'repair report downloaded')
+      }
+    })()
   }
 
   const flipCamera = () => {
@@ -744,6 +814,22 @@ export default function Scanner() {
           >
             <span className="motion-safe:animate-pulse inline-block h-2 w-2 rounded-full bg-cyan-300" />
             Analyzing…
+          </div>
+        )}
+        {findings.length > 0 && (
+          <div
+            role="status"
+            aria-label="Label findings"
+            className="w-full rounded-xl bg-black/80 backdrop-blur-md border border-white/20 px-4 py-2 flex flex-wrap items-center gap-2"
+          >
+            {findings.map((finding, i) => (
+              <span
+                key={`${finding}-${i}`}
+                className="rounded-full bg-white/15 px-3 py-1 text-sm font-mono text-white"
+              >
+                {finding}
+              </span>
+            ))}
           </div>
         )}
         {(guidancePending || guidance) && !isDesktop && (

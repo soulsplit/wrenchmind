@@ -3,7 +3,9 @@ import {
   BURST_INTERVAL_MS,
   FRAME_BURST,
   captureFrameBurst,
+  captureThumbnail,
   captureVideoFrame,
+  extractLabelText,
   hasApiKey,
   reasonSpatial,
   segmentImage,
@@ -230,6 +232,53 @@ async function collect<T>(gen: AsyncIterable<T>): Promise<T[]> {
   return out
 }
 
+describe('extractLabelText', () => {
+  it('sends the frame with a transcription prompt and returns findings', async () => {
+    vi.stubEnv('VITE_META_MODEL_API_KEY', 'k')
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue(
+      jsonResponse(sparkEnvelope(JSON.stringify({ findings: ['ABC-123', '24V DC'] }))),
+    )
+
+    const result = await extractLabelText('data:image/jpeg;base64,AAA')
+    expect(result).toEqual(['ABC-123', '24V DC'])
+    const [, init] = fetchMock.mock.calls[0] as [string, { body: string }]
+    const body = JSON.parse(init.body) as {
+      model: string
+      messages: [{ content: string }, { content: [{ text: string }, { image_url: { url: string } }] }]
+    }
+    expect(body.model).toBe('muse-spark-1.3')
+    expect(body.messages[0].content).toContain('findings')
+    expect(body.messages[1].content[1].image_url.url).toBe('data:image/jpeg;base64,AAA')
+  })
+
+  it('sanitizes findings: trims, drops non-strings and empties, caps at 10', async () => {
+    vi.stubEnv('VITE_META_MODEL_API_KEY', 'k')
+    vi.stubGlobal('fetch', fetchMock)
+    const findings = ['  padded  ', '', '   ', 42, null, ...Array.from({ length: 12 }, (_, i) => `P-${i}`)]
+    fetchMock.mockResolvedValue(jsonResponse(sparkEnvelope(JSON.stringify({ findings }))))
+
+    const result = await extractLabelText('img')
+    expect(result).toEqual(['padded', ...Array.from({ length: 9 }, (_, i) => `P-${i}`)])
+  })
+
+  it('returns an empty list when findings are missing or malformed', async () => {
+    vi.stubEnv('VITE_META_MODEL_API_KEY', 'k')
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValueOnce(jsonResponse(sparkEnvelope(JSON.stringify({}))))
+    await expect(extractLabelText('img')).resolves.toEqual([])
+    fetchMock.mockResolvedValueOnce(jsonResponse(sparkEnvelope(JSON.stringify({ findings: 'nope' }))))
+    await expect(extractLabelText('img')).resolves.toEqual([])
+  })
+
+  it('throws on HTTP errors', async () => {
+    vi.stubEnv('VITE_META_MODEL_API_KEY', 'k')
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValueOnce(errorResponse(500, 'boom'))
+    await expect(extractLabelText('img')).rejects.toThrow('Muse Spark 500')
+  })
+})
+
 describe('segmentImage', () => {
   it('sends a point prompt in token grammar and yields stream events', async () => {
     vi.stubEnv('VITE_META_MODEL_API_KEY', 'k')
@@ -421,6 +470,45 @@ describe('captureVideoFrame', () => {
       Object.defineProperty(video, 'videoHeight', { value: 480, configurable: true })
       expect(captureVideoFrame(video)).toBe('data:image/jpeg;base64,')
       expect(drawImage).toHaveBeenCalledTimes(1)
+    } finally {
+      ctxSpy.mockRestore()
+    }
+  })
+})
+
+describe('captureThumbnail', () => {
+  it('returns empty string when no frame is available', () => {
+    const video = document.createElement('video')
+    expect(captureThumbnail(video)).toBe('')
+  })
+
+  it('downscales the frame to the max width', () => {
+    const drawImage = vi.fn()
+    const ctxSpy = vi
+      .spyOn(window.HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue({ drawImage } as unknown as CanvasRenderingContext2D)
+    try {
+      const video = document.createElement('video')
+      Object.defineProperty(video, 'videoWidth', { value: 640, configurable: true })
+      Object.defineProperty(video, 'videoHeight', { value: 480, configurable: true })
+      expect(captureThumbnail(video)).toBe('data:image/jpeg;base64,')
+      expect(drawImage).toHaveBeenCalledWith(video, 0, 0, 320, 240)
+    } finally {
+      ctxSpy.mockRestore()
+    }
+  })
+
+  it('never upscales small frames', () => {
+    const drawImage = vi.fn()
+    const ctxSpy = vi
+      .spyOn(window.HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue({ drawImage } as unknown as CanvasRenderingContext2D)
+    try {
+      const video = document.createElement('video')
+      Object.defineProperty(video, 'videoWidth', { value: 160, configurable: true })
+      Object.defineProperty(video, 'videoHeight', { value: 120, configurable: true })
+      captureThumbnail(video)
+      expect(drawImage).toHaveBeenCalledWith(video, 0, 0, 160, 120)
     } finally {
       ctxSpy.mockRestore()
     }

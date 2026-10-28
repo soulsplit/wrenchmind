@@ -4,6 +4,7 @@ import Scanner from './Scanner'
 import {
   captureFrameBurst,
   captureVideoFrame,
+  extractLabelText,
   reasonSpatial,
   segmentImage,
 } from '../services/metaApi'
@@ -37,6 +38,7 @@ vi.mock('../services/metaApi', async (importOriginal) => {
     ...actual,
     captureFrameBurst: vi.fn(),
     captureVideoFrame: vi.fn(),
+    extractLabelText: vi.fn(),
     reasonSpatial: vi.fn(),
     segmentImage: vi.fn(),
   }
@@ -119,6 +121,51 @@ function openOverflow(): void {
   fireEvent.click(screen.getByRole('button', { name: 'More options' }))
 }
 
+function captureDownload(): { blob: Blob | null } {
+  const captured: { blob: Blob | null } = { blob: null }
+  Object.defineProperty(URL, 'createObjectURL', {
+    value: vi.fn((blob: Blob) => {
+      captured.blob = blob
+      return 'blob:fake'
+    }),
+    configurable: true,
+  })
+  Object.defineProperty(URL, 'revokeObjectURL', { value: vi.fn(), configurable: true })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  return captured
+}
+
+function mockCanvas2d(): () => void {
+  const ctx = new Proxy(
+    { marker: 'ctx', drawImage: vi.fn(), measureText: () => ({ width: 10 }) },
+    {
+      get: (target, prop) => {
+        if (prop === 'createImageData') {
+          return (w: number, h: number) => ({
+            data: new Uint8ClampedArray(w * h * 4),
+            width: w,
+            height: h,
+          })
+        }
+        const value = (target as Record<PropertyKey, unknown>)[prop]
+        return value ?? (() => undefined)
+      },
+      set: () => true,
+    },
+  )
+  const ctxSpy = vi
+    .spyOn(window.HTMLCanvasElement.prototype, 'getContext')
+    .mockReturnValue(ctx as unknown as CanvasRenderingContext2D)
+  return () => ctxSpy.mockRestore()
+}
+
+function setVideoDims(container: HTMLElement, w = 640, h = 480): void {
+  const video = container.querySelector('video')
+  if (!video) throw new Error('missing video element')
+  Object.defineProperty(video, 'videoWidth', { value: w, configurable: true })
+  Object.defineProperty(video, 'videoHeight', { value: h, configurable: true })
+}
+
 beforeEach(() => {
   assistants.length = 0
   clearLogs()
@@ -126,6 +173,7 @@ beforeEach(() => {
   vi.mocked(captureFrameBurst).mockReset().mockResolvedValue(['data:image/jpeg;base64,AAA'])
   vi.mocked(captureVideoFrame).mockReset().mockReturnValue('data:image/jpeg;base64,AAA')
   vi.mocked(reasonSpatial).mockReset()
+  vi.mocked(extractLabelText).mockReset().mockResolvedValue([])
   vi.mocked(segmentImage).mockReset().mockReturnValue(emptyEvents())
   // Default mirrors the stub: guidance unavailable, AR pipeline unaffected.
   vi.mocked(fetchGuidance).mockReset().mockRejectedValue(new Error('not implemented'))
@@ -571,6 +619,224 @@ describe('Scanner', () => {
     })
     expect(reasonSpatial).toHaveBeenCalledTimes(2)
     expect(await screen.findByText('Step 1 of 3')).toBeInTheDocument()
+  })
+
+  it('reads label markings on "read this label"', async () => {
+    mockCamera(true)
+    vi.mocked(extractLabelText).mockResolvedValue(['ABC-123', '24V DC'])
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('read this label')
+    })
+    expect(await screen.findByText('ABC-123')).toBeInTheDocument()
+    expect(screen.getByText('24V DC')).toBeInTheDocument()
+    expect(reasonSpatial).not.toHaveBeenCalled()
+    expect(segmentImage).not.toHaveBeenCalled()
+    const calls = vi.mocked(speakText).mock.calls
+    expect(calls[calls.length - 1][0]).toContain('ABC-123')
+  })
+
+  it('handles illegible labels gracefully', async () => {
+    mockCamera(true)
+    vi.mocked(extractLabelText).mockResolvedValue([])
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('read the label')
+    })
+    expect(screen.queryByRole('status', { name: 'Label findings' })).not.toBeInTheDocument()
+    const calls = vi.mocked(speakText).mock.calls
+    expect(calls[calls.length - 1][0]).toContain('could not read')
+  })
+
+  it('does not treat label-like sentences as label reads', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Screw',
+      approx_x: 10,
+      approx_y: 10,
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('can you read this label for me')
+    })
+    expect(reasonSpatial).toHaveBeenCalledTimes(1)
+    expect(extractLabelText).not.toHaveBeenCalled()
+  })
+
+  it('clears findings with Clear AR View', async () => {
+    mockCamera(true)
+    vi.mocked(extractLabelText).mockResolvedValue(['ABC-123'])
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('read this label')
+    })
+    expect(await screen.findByText('ABC-123')).toBeInTheDocument()
+    openOverflow()
+    fireEvent.click(screen.getByText('Clear AR View'))
+    expect(screen.queryByText('ABC-123')).not.toBeInTheDocument()
+  })
+
+  it('exports findings in the repair report', async () => {
+    mockCamera(true)
+    vi.mocked(extractLabelText).mockResolvedValue(['ABC-123'])
+    const captured: { blob: Blob | null } = { blob: null }
+    Object.defineProperty(URL, 'createObjectURL', {
+      value: vi.fn((blob: Blob) => {
+        captured.blob = blob
+        return 'blob:fake'
+      }),
+      configurable: true,
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', { value: vi.fn(), configurable: true })
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('read this label')
+    })
+    expect(await screen.findByText('ABC-123')).toBeInTheDocument()
+    openOverflow()
+    fireEvent.click(screen.getByText('Export Report'))
+    await waitFor(() => expect(captured.blob).not.toBeNull())
+    await expect(captured.blob?.text()).resolves.toContain('- ABC-123')
+  })
+
+  it('pins a photo checkpoint when advancing steps', async () => {
+    const restoreCanvas = mockCanvas2d()
+    try {
+      mockCamera(true)
+      vi.mocked(reasonSpatial).mockResolvedValue({
+        target_label: 'Belt',
+        approx_x: 10,
+        approx_y: 10,
+        speech_response: null,
+        display_mode: 'visual_only',
+      })
+      vi.mocked(fetchGuidance).mockResolvedValue(validGuidanceFixture)
+      const captured = captureDownload()
+      const { container } = render(<Scanner />)
+      setVideoDims(container)
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('show belt')
+      })
+      expect(await screen.findByText('Remove the belt cover')).toBeInTheDocument()
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('done')
+      })
+      expect(await screen.findByText('Step 2 of 3')).toBeInTheDocument()
+      openOverflow()
+      fireEvent.click(screen.getByText('Export Report'))
+      await waitFor(() => expect(captured.blob).not.toBeNull())
+      await expect(captured.blob?.text()).resolves.toContain(
+        '![Step 1 photo](data:image/jpeg;base64,)',
+      )
+    } finally {
+      restoreCanvas()
+    }
+  })
+
+  it('does not capture checkpoints on back or repeat', async () => {
+    const restoreCanvas = mockCanvas2d()
+    try {
+      mockCamera(true)
+      vi.mocked(reasonSpatial).mockResolvedValue({
+        target_label: 'Belt',
+        approx_x: 10,
+        approx_y: 10,
+        speech_response: null,
+        display_mode: 'visual_only',
+      })
+      vi.mocked(fetchGuidance).mockResolvedValue(validGuidanceFixture)
+      const captured = captureDownload()
+      const { container } = render(<Scanner />)
+      setVideoDims(container)
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('show belt')
+      })
+      expect(await screen.findByText('Remove the belt cover')).toBeInTheDocument()
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('done')
+      })
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('back')
+      })
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('repeat')
+      })
+      openOverflow()
+      fireEvent.click(screen.getByText('Export Report'))
+      await waitFor(() => expect(captured.blob).not.toBeNull())
+      const text = (await captured.blob?.text()) ?? ''
+      expect(text.match(/!\[Step \d+ photo\]/g)).toHaveLength(1)
+    } finally {
+      restoreCanvas()
+    }
+  })
+
+  it('clears checkpoints with Clear AR View', async () => {
+    const restoreCanvas = mockCanvas2d()
+    try {
+      mockCamera(true)
+      vi.mocked(reasonSpatial).mockResolvedValue({
+        target_label: 'Belt',
+        approx_x: 10,
+        approx_y: 10,
+        speech_response: null,
+        display_mode: 'visual_only',
+      })
+      vi.mocked(fetchGuidance).mockResolvedValue(validGuidanceFixture)
+      const captured = captureDownload()
+      const { container } = render(<Scanner />)
+      setVideoDims(container)
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('show belt')
+      })
+      expect(await screen.findByText('Remove the belt cover')).toBeInTheDocument()
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('done')
+      })
+      expect(await screen.findByText('Step 2 of 3')).toBeInTheDocument()
+      openOverflow()
+      fireEvent.click(screen.getByText('Clear AR View'))
+      fireEvent.click(screen.getByText('Export Report'))
+      await waitFor(() => expect(captured.blob).not.toBeNull())
+      await expect(captured.blob?.text()).resolves.not.toContain('![Step')
+    } finally {
+      restoreCanvas()
+    }
+  })
+
+  it('shares the report when the platform accepts it', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Belt',
+      approx_x: 10,
+      approx_y: 10,
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    vi.mocked(fetchGuidance).mockResolvedValue(validGuidanceFixture)
+    const captured = captureDownload()
+    const share = vi.fn(async () => {})
+    Object.defineProperty(navigator, 'canShare', { value: vi.fn(() => true), configurable: true })
+    Object.defineProperty(navigator, 'share', { value: share, configurable: true })
+    try {
+      render(<Scanner />)
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('show belt')
+      })
+      expect(await screen.findByText('Remove the belt cover')).toBeInTheDocument()
+      openOverflow()
+      fireEvent.click(screen.getByText('Export Report'))
+      await waitFor(() => expect(share).toHaveBeenCalledTimes(1))
+      expect(captured.blob).toBeNull()
+      expect(getLogs().some((e) => e.message.includes('repair report shared'))).toBe(true)
+    } finally {
+      const nav = navigator as unknown as Record<string, unknown>
+      delete nav['canShare']
+      delete nav['share']
+    }
   })
 
   it('unlocks tracking when switching cameras', async () => {
@@ -1123,6 +1389,7 @@ describe('Scanner', () => {
     ])
     openOverflow()
     fireEvent.click(screen.getByText('Export Report'))
+    await waitFor(() => expect(captured.blob).not.toBeNull())
     await expect(captured.blob?.text()).resolves.toContain('## MID-DRIVE DRIVE BELT')
     await expect(captured.blob?.text()).resolves.toContain('Working on: Drive belt, Tensioner')
     expect(getLogs().some((e) => e.message.includes('repair report downloaded'))).toBe(true)

@@ -60,6 +60,22 @@ export const FRAME_BURST = 3
 /** Delay between burst frames. */
 export const BURST_INTERVAL_MS = 300
 
+/**
+ * Capture the current frame downscaled to a small JPEG data URL for step
+ * checkpoints. Never upscales; empty when no frame is available.
+ */
+export function captureThumbnail(video: HTMLVideoElement, maxWidth = 320): string {
+  if (!video.videoWidth || !video.videoHeight) return ''
+  const scale = Math.min(1, maxWidth / video.videoWidth)
+  const c = document.createElement('canvas')
+  c.width = Math.max(1, Math.floor(video.videoWidth * scale))
+  c.height = Math.max(1, Math.floor(video.videoHeight * scale))
+  const ctx = c.getContext('2d')
+  if (!ctx) return ''
+  ctx.drawImage(video, 0, 0, c.width, c.height)
+  return c.toDataURL('image/jpeg', 0.7)
+}
+
 /** Capture a short burst of frames; empty captures are dropped. */
 export async function captureFrameBurst(
   video: HTMLVideoElement,
@@ -153,6 +169,61 @@ export async function reasonSpatial(
     speech_response: typeof parsed.speech_response === 'string' ? parsed.speech_response : null,
     display_mode: parsed.display_mode === 'speech_and_visual' ? 'speech_and_visual' : 'visual_only',
   }
+}
+
+/** Max transcribed markings kept per label read. */
+export const MAX_LABEL_FINDINGS = 10
+
+/**
+ * Transcribe the visible markings on an equipment label, rating plate, or
+ * part. Returns one string per marking (part numbers, models, ratings,
+ * serials first); empty when nothing is legible.
+ */
+export async function extractLabelText(image: string): Promise<string[]> {
+  const res = await fetchWithTimeout(
+    `${BASE}/chat/completions`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${key()}`,
+      },
+      body: JSON.stringify({
+        model: 'muse-spark-1.3',
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You are a label transcription assistant. Given an image of an equipment label, rating plate, or part marking, transcribe every visible marking. Return ONLY a JSON object: { "findings": string[] } — one entry per marking, part number, model, rating, or serial, most important first. Empty array when no text is legible.',
+          },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Transcribe all visible markings on this label.' },
+              { type: 'image_url', image_url: { url: image } },
+            ],
+          },
+        ],
+        response_format: { type: 'json_object' },
+      }),
+    },
+    REASON_TIMEOUT_MS,
+    'muse-spark-labels',
+  )
+  if (!res.ok) {
+    const suffix = await errorDetail(res)
+    logError('api', `muse-spark request failed: HTTP ${res.status}${suffix}`)
+    throw new Error(`Muse Spark ${res.status}${suffix}`)
+  }
+  const data = await res.json()
+  const text = data.choices?.[0]?.message?.content ?? '{}'
+  const parsed = JSON.parse(text) as { findings?: unknown }
+  if (!Array.isArray(parsed.findings)) return []
+  return parsed.findings
+    .filter((entry): entry is string => typeof entry === 'string')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+    .slice(0, MAX_LABEL_FINDINGS)
 }
 
 /** Point prompt in media pixels, per the SAM box/point prompt grammar. */
