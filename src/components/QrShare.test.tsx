@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
-import QrShare, { getShareWarning } from './QrShare'
+import QrShare from './QrShare'
+import { getShareWarning } from '../services/share'
 
 beforeEach(() => {
   window.localStorage.clear()

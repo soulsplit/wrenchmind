@@ -1,20 +1,31 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import Scanner from './Scanner'
+import {
+  clampZoomPan,
+  identifyWithContext,
+  pinchZoom,
+  stageBoxToMedia,
+  tapToMedia,
+  zoomAt,
+} from '../services/feedStage'
 import {
   captureFrameBurst,
   captureVideoFrame,
+  cropRegion,
   extractLabelText,
+  identifyComponent,
   reasonSpatial,
   segmentImage,
 } from '../services/metaApi'
 import { parseSamStream } from '../services/samParser'
 import { fetchGuidance } from '../services/guidanceApi'
+import { searchGuides } from '../services/ifixitApi'
 import { cancelSpeech, speakText } from '../services/speechOutput'
 import { useKeyboardShift } from '../hooks/useKeyboardShift'
 import type { SamStreamEvent } from '../services/metaApi'
 import type { VoiceAssistantCallbacks } from '../services/voiceAssistant'
-import type { GuidanceResult, SpatialResult } from '../types'
+import type { GuidanceResult, MaskRecord, SpatialResult } from '../types'
 import { validGuidanceFixture } from '../test/guidanceFixtures'
 import { clearLogs, getLogs } from '../services/logger'
 
@@ -32,13 +43,20 @@ interface AssistantDouble {
 
 const assistants = vi.hoisted(() => [] as AssistantDouble[])
 
+vi.mock('../services/ifixitApi', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../services/ifixitApi')>()
+  return { ...actual, searchGuides: vi.fn() }
+})
+
 vi.mock('../services/metaApi', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../services/metaApi')>()
   return {
     ...actual,
     captureFrameBurst: vi.fn(),
     captureVideoFrame: vi.fn(),
+    cropRegion: vi.fn(),
     extractLabelText: vi.fn(),
+    identifyComponent: vi.fn(),
     reasonSpatial: vi.fn(),
     segmentImage: vi.fn(),
   }
@@ -121,6 +139,22 @@ function openOverflow(): void {
   fireEvent.click(screen.getByRole('button', { name: 'More options' }))
 }
 
+async function enableVoiceMode(): Promise<void> {
+  openOverflow()
+  fireEvent.click(screen.getByRole('switch', { name: 'Voice mode' }))
+  // handleToggle awaits assistant.start() before setting voiceOn: flush the
+  // toggle continuation and its re-render so speech is gated on afterwards.
+  await act(async () => {})
+}
+
+/** Zoom in via wheel gestures (1.2x per tick, no tap suppression). */
+function wheelZoomIn(times = 1): void {
+  const stage = screen.getByTestId('zoom-stage')
+  for (let i = 0; i < times; i++) {
+    fireEvent.wheel(stage, { deltaY: -100, clientX: 100, clientY: 100 })
+  }
+}
+
 function torchStream(applyImpl?: () => Promise<void>): {
   stream: MediaStream
   applyConstraints: Mock
@@ -192,17 +226,51 @@ function setVideoDims(container: HTMLElement, w = 640, h = 480): void {
   Object.defineProperty(video, 'videoHeight', { value: h, configurable: true })
 }
 
+function mockMediaControls(): {
+  play: Mock
+  pause: Mock
+  restore: () => void
+} {
+  const proto = window.HTMLVideoElement.prototype as unknown as Record<string, unknown>
+  const originalPlay = Object.getOwnPropertyDescriptor(proto, 'play')
+  const originalPause = Object.getOwnPropertyDescriptor(proto, 'pause')
+  const play = vi.fn(async () => {})
+  const pause = vi.fn(() => {})
+  Object.defineProperty(proto, 'play', { value: play, configurable: true, writable: true })
+  Object.defineProperty(proto, 'pause', { value: pause, configurable: true, writable: true })
+  return {
+    play,
+    pause,
+    restore: () => {
+      if (originalPlay) {
+        Object.defineProperty(proto, 'play', originalPlay)
+      } else {
+        delete proto['play']
+      }
+      if (originalPause) {
+        Object.defineProperty(proto, 'pause', originalPause)
+      } else {
+        delete proto['pause']
+      }
+    },
+  }
+}
+
 beforeEach(() => {
   assistants.length = 0
   clearLogs()
   vi.stubEnv('VITE_META_MODEL_API_KEY', 'test-key')
   vi.mocked(captureFrameBurst).mockReset().mockResolvedValue(['data:image/jpeg;base64,AAA'])
   vi.mocked(captureVideoFrame).mockReset().mockReturnValue('data:image/jpeg;base64,AAA')
+  vi.mocked(cropRegion).mockReset().mockReturnValue('data:image/jpeg;base64,CROP')
+  vi.mocked(identifyComponent).mockReset().mockResolvedValue('M6 hex bolt')
+  vi.mocked(parseSamStream).mockReset().mockResolvedValue([])
   vi.mocked(reasonSpatial).mockReset()
   vi.mocked(extractLabelText).mockReset().mockResolvedValue([])
   vi.mocked(segmentImage).mockReset().mockReturnValue(emptyEvents())
   // Default mirrors the stub: guidance unavailable, AR pipeline unaffected.
   vi.mocked(fetchGuidance).mockReset().mockRejectedValue(new Error('not implemented'))
+  vi.mocked(searchGuides).mockReset().mockResolvedValue([])
   vi.mocked(speakText).mockReset().mockResolvedValue(undefined)
   vi.mocked(cancelSpeech).mockReset()
   vi.mocked(useKeyboardShift).mockReset().mockReturnValue(0)
@@ -232,15 +300,45 @@ describe('Scanner', () => {
     render(<Scanner />)
     openOverflow()
     await waitFor(() =>
-      expect(getUserMedia).toHaveBeenCalledWith({ video: { facingMode: 'environment' } }),
+      expect(getUserMedia).toHaveBeenCalledWith({
+        video: {
+          facingMode: 'environment',
+          width: { ideal: 3840 },
+          height: { ideal: 2160 },
+        },
+      }),
     )
     fireEvent.click(screen.getByRole('button', { name: 'Switch camera' }))
     await waitFor(() =>
-      expect(getUserMedia).toHaveBeenCalledWith({ video: { facingMode: 'user' } }),
+      expect(getUserMedia).toHaveBeenCalledWith({
+        video: {
+          facingMode: 'user',
+          width: { ideal: 3840 },
+          height: { ideal: 2160 },
+        },
+      }),
     )
     fireEvent.click(screen.getByRole('button', { name: 'Switch camera' }))
     await waitFor(() =>
       expect(getUserMedia).toHaveBeenCalledTimes(3),
+    )
+  })
+
+  it('logs the negotiated capture resolution', async () => {
+    const stream = new MediaStream()
+    if (typeof stream.getTracks !== 'function') {
+      stream.getTracks = () => []
+    }
+    const track = {
+      stop: vi.fn(),
+      getSettings: () => ({ facingMode: 'environment', width: 3840, height: 2160 }),
+    } as unknown as MediaStreamTrack
+    stream.getVideoTracks = () => [track]
+    mockCameraStream(stream)
+    render(<Scanner />)
+    expect(await screen.findByText('LIVE')).toBeInTheDocument()
+    await waitFor(() =>
+      expect(getLogs().some((e) => e.message.includes('negotiated 3840x2160'))).toBe(true),
     )
   })
 
@@ -310,7 +408,13 @@ describe('Scanner', () => {
     expect(await screen.findByText('REAR CAMERA')).toBeInTheDocument()
     openOverflow()
     await waitFor(() =>
-      expect(getUserMedia).toHaveBeenCalledWith({ video: { facingMode: 'environment' } }),
+      expect(getUserMedia).toHaveBeenCalledWith({
+        video: {
+          facingMode: 'environment',
+          width: { ideal: 3840 },
+          height: { ideal: 2160 },
+        },
+      }),
     )
     fireEvent.click(screen.getByRole('button', { name: 'Switch camera' }))
     expect(await screen.findByText('FRONT CAMERA')).toBeInTheDocument()
@@ -353,13 +457,13 @@ describe('Scanner', () => {
     mockCamera(true)
     render(<Scanner />)
     openOverflow()
-    const toggle = screen.getByRole('switch')
+    const toggle = screen.getByRole('switch', { name: 'Voice mode' })
     fireEvent.click(toggle)
     expect(await screen.findByText('[ 🟢 LISTENING... ]')).toBeInTheDocument()
     expect(assistants[0].start).toHaveBeenCalledTimes(1)
-    fireEvent.click(screen.getByRole('switch'))
+    fireEvent.click(screen.getByRole('switch', { name: 'Voice mode' }))
     expect(screen.queryByText('[ OFF ]')).not.toBeInTheDocument()
-    expect(screen.getByRole('switch')).toHaveAttribute('aria-checked', 'false')
+    expect(screen.getByRole('switch', { name: 'Voice mode' })).toHaveAttribute('aria-checked', 'false')
     expect(assistants[0].stop).toHaveBeenCalledTimes(1)
   })
 
@@ -367,14 +471,14 @@ describe('Scanner', () => {
     mockCamera(true)
     render(<Scanner />)
     openOverflow()
-    fireEvent.click(screen.getByRole('switch'))
+    fireEvent.click(screen.getByRole('switch', { name: 'Voice mode' }))
     await screen.findByText('[ 🟢 LISTENING... ]')
     act(() => {
       assistants[0].callbacks.onError('Microphone access denied')
     })
     expect(await screen.findByRole('alert')).toHaveTextContent('Microphone access denied')
     expect(screen.queryByText('[ OFF ]')).not.toBeInTheDocument()
-    expect(screen.getByRole('switch')).toHaveAttribute('aria-checked', 'false')
+    expect(screen.getByRole('switch', { name: 'Voice mode' })).toHaveAttribute('aria-checked', 'false')
   })
 
   it('runs the phrase pipeline and anchors a callout pill', async () => {
@@ -514,6 +618,7 @@ describe('Scanner', () => {
         display_mode: 'speech_and_visual',
       })
     render(<Scanner />)
+    await enableVoiceMode()
     await act(async () => {
       assistants[0].callbacks.onPhrase('show screws')
     })
@@ -573,6 +678,7 @@ describe('Scanner', () => {
     })
     vi.mocked(fetchGuidance).mockResolvedValue(validGuidanceFixture)
     render(<Scanner />)
+    await enableVoiceMode()
     await act(async () => {
       assistants[0].callbacks.onPhrase('show screws')
     })
@@ -603,6 +709,7 @@ describe('Scanner', () => {
     })
     vi.mocked(fetchGuidance).mockResolvedValue(validGuidanceFixture)
     render(<Scanner />)
+    await enableVoiceMode()
     await act(async () => {
       assistants[0].callbacks.onPhrase('show screws')
     })
@@ -651,6 +758,7 @@ describe('Scanner', () => {
     mockCamera(true)
     vi.mocked(extractLabelText).mockResolvedValue(['ABC-123', '24V DC'])
     render(<Scanner />)
+    await enableVoiceMode()
     await act(async () => {
       assistants[0].callbacks.onPhrase('read this label')
     })
@@ -666,6 +774,7 @@ describe('Scanner', () => {
     mockCamera(true)
     vi.mocked(extractLabelText).mockResolvedValue([])
     render(<Scanner />)
+    await enableVoiceMode()
     await act(async () => {
       assistants[0].callbacks.onPhrase('read the label')
     })
@@ -725,7 +834,7 @@ describe('Scanner', () => {
     openOverflow()
     fireEvent.click(screen.getByText('Export Report'))
     await waitFor(() => expect(captured.blob).not.toBeNull())
-    await expect(captured.blob?.text()).resolves.toContain('- ABC-123')
+    await expect(captured.blob?.text()).resolves.toContain('<li>ABC-123</li>')
   })
 
   it('pins a photo checkpoint when advancing steps', async () => {
@@ -755,7 +864,7 @@ describe('Scanner', () => {
       fireEvent.click(screen.getByText('Export Report'))
       await waitFor(() => expect(captured.blob).not.toBeNull())
       await expect(captured.blob?.text()).resolves.toContain(
-        '![Step 1 photo](data:image/jpeg;base64,)',
+        '<img alt="Step 1 photo" src="data:image/jpeg;base64,">',
       )
     } finally {
       restoreCanvas()
@@ -794,7 +903,7 @@ describe('Scanner', () => {
       fireEvent.click(screen.getByText('Export Report'))
       await waitFor(() => expect(captured.blob).not.toBeNull())
       const text = (await captured.blob?.text()) ?? ''
-      expect(text.match(/!\[Step \d+ photo\]/g)).toHaveLength(1)
+      expect(text.match(/<img alt="Step \d+ photo"/g)).toHaveLength(1)
     } finally {
       restoreCanvas()
     }
@@ -827,7 +936,7 @@ describe('Scanner', () => {
       fireEvent.click(screen.getByText('Clear AR View'))
       fireEvent.click(screen.getByText('Export Report'))
       await waitFor(() => expect(captured.blob).not.toBeNull())
-      await expect(captured.blob?.text()).resolves.not.toContain('![Step')
+      await expect(captured.blob?.text()).resolves.not.toContain('<img')
     } finally {
       restoreCanvas()
     }
@@ -928,6 +1037,85 @@ describe('Scanner', () => {
       expect(getLogs().some((e) => e.message.includes('flashlight'))).toBe(true)
     })
     expect(toggle).not.toBeChecked()
+  })
+
+  it('fetches iFixit guides on scan and shows them in the card', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Belt',
+      approx_x: 10,
+      approx_y: 10,
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    vi.mocked(fetchGuidance).mockResolvedValue(validGuidanceFixture)
+    vi.mocked(searchGuides).mockResolvedValue([
+      {
+        title: 'Lenovo Laptop Not Charging',
+        url: 'https://www.ifixit.com/Troubleshooting/Lenovo_Laptop/Not+Charging/539059',
+        summary: '',
+        difficulty: null,
+        kind: 'wiki',
+      },
+    ])
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show belt')
+    })
+    expect(await screen.findByText('Remove the belt cover')).toBeInTheDocument()
+    expect(searchGuides).toHaveBeenCalledWith('show belt Belt', 3)
+    const link = await screen.findByRole('link', { name: 'Lenovo Laptop Not Charging' })
+    expect(link).toHaveAttribute(
+      'href',
+      'https://www.ifixit.com/Troubleshooting/Lenovo_Laptop/Not+Charging/539059',
+    )
+  })
+
+  it('keeps the card intact when guide lookup fails', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Belt',
+      approx_x: 10,
+      approx_y: 10,
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    vi.mocked(fetchGuidance).mockResolvedValue(validGuidanceFixture)
+    vi.mocked(searchGuides).mockRejectedValue(new Error('iFixit 429'))
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show belt')
+    })
+    expect(await screen.findByText('Remove the belt cover')).toBeInTheDocument()
+    expect(
+      await screen.findByRole('link', { name: `Search iFixit for ${validGuidanceFixture.title}` }),
+    ).toBeInTheDocument()
+    expect(screen.getByText('No iFixit guides found for this part.')).toBeInTheDocument()
+  })
+
+  it('refetches guides per scan after Scan Another', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Belt',
+      approx_x: 10,
+      approx_y: 10,
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    vi.mocked(fetchGuidance).mockResolvedValue(validGuidanceFixture)
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show belt')
+    })
+    expect(await screen.findByText('Remove the belt cover')).toBeInTheDocument()
+    expect(searchGuides).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByText('Scan Another Part'))
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show tensioner')
+    })
+    expect(await screen.findByText('Remove the belt cover')).toBeInTheDocument()
+    expect(searchGuides).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(searchGuides).mock.calls[1][0]).toBe('show tensioner Belt')
   })
 
   it('unlocks tracking when switching cameras', async () => {
@@ -1245,7 +1433,7 @@ describe('Scanner', () => {
         openOverflow()
       })
       await act(async () => {
-        fireEvent.click(screen.getByRole('switch'))
+        fireEvent.click(screen.getByRole('switch', { name: 'Voice mode' }))
       })
       expect(screen.getByText('[ 🟢 LISTENING... ]')).toBeInTheDocument()
       await act(async () => {
@@ -1253,10 +1441,10 @@ describe('Scanner', () => {
       })
       expect(segmentImage).toHaveBeenCalledTimes(1)
       await act(async () => {
-        fireEvent.click(screen.getByRole('switch'))
+        fireEvent.click(screen.getByRole('switch', { name: 'Voice mode' }))
       })
       expect(screen.queryByText('[ OFF ]')).not.toBeInTheDocument()
-      expect(screen.getByRole('switch')).toHaveAttribute('aria-checked', 'false')
+      expect(screen.getByRole('switch', { name: 'Voice mode' })).toHaveAttribute('aria-checked', 'false')
       await act(async () => {
         await vi.advanceTimersByTimeAsync(10000)
       })
@@ -1386,6 +1574,7 @@ describe('Scanner', () => {
       display_mode: 'speech_and_visual',
     })
     render(<Scanner />)
+    await enableVoiceMode()
     await act(async () => {
       assistants[0].callbacks.onPhrase('go')
     })
@@ -1411,7 +1600,7 @@ describe('Scanner', () => {
     )
     render(<Scanner />)
     openOverflow()
-    fireEvent.click(screen.getByRole('switch'))
+    fireEvent.click(screen.getByRole('switch', { name: 'Voice mode' }))
     await screen.findByText('[ 🟢 LISTENING... ]')
     await act(async () => {
       assistants[0].callbacks.onPhrase('go')
@@ -1422,6 +1611,46 @@ describe('Scanner', () => {
       releaseSpeak()
     })
     expect(await screen.findByText('[ 🟢 LISTENING... ]')).toBeInTheDocument()
+  })
+
+  it('stays silent with voice mode off', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Screw',
+      approx_x: 10,
+      approx_y: 10,
+      speech_response: 'done',
+      display_mode: 'speech_and_visual',
+    })
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('go')
+    })
+    expect(await screen.findByText('Screw')).toBeInTheDocument()
+    expect(speakText).not.toHaveBeenCalled()
+    expect(screen.queryByText('[ 🔊 SPEAKING... ]')).not.toBeInTheDocument()
+  })
+
+  it('step commands advance silently with voice mode off', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Screw',
+      approx_x: 10,
+      approx_y: 10,
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    vi.mocked(fetchGuidance).mockResolvedValue(validGuidanceFixture)
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show screws')
+    })
+    expect(await screen.findByText('Remove the belt cover')).toBeInTheDocument()
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('done')
+    })
+    expect(await screen.findByText('Step 2 of 3')).toBeInTheDocument()
+    expect(speakText).not.toHaveBeenCalled()
   })
 
   it('stays silent in visual-only mode', async () => {
@@ -1481,7 +1710,7 @@ describe('Scanner', () => {
     openOverflow()
     fireEvent.click(screen.getByText('Export Report'))
     await waitFor(() => expect(captured.blob).not.toBeNull())
-    await expect(captured.blob?.text()).resolves.toContain('## MID-DRIVE DRIVE BELT')
+    await expect(captured.blob?.text()).resolves.toContain('<h2>MID-DRIVE DRIVE BELT</h2>')
     await expect(captured.blob?.text()).resolves.toContain('Working on: Drive belt, Tensioner')
     expect(getLogs().some((e) => e.message.includes('repair report downloaded'))).toBe(true)
   })
@@ -1744,7 +1973,7 @@ describe('Scanner', () => {
     vi.mocked(reasonSpatial).mockRejectedValue(new Error('network down'))
     render(<Scanner />)
     openOverflow()
-    fireEvent.click(screen.getByRole('switch'))
+    fireEvent.click(screen.getByRole('switch', { name: 'Voice mode' }))
     await screen.findByText('[ 🟢 LISTENING... ]')
     await act(async () => {
       assistants[0].callbacks.onPhrase('show screws')
@@ -2048,6 +2277,7 @@ describe('Scanner states (Wave 3)', () => {
     })
     const indicator = screen.getByText('Analyzing…')
     expect(indicator).toBeInTheDocument()
+    expect(indicator).toHaveClass('self-center')
     expect(indicator.querySelector('span')).toHaveClass('motion-safe:animate-pulse')
     expect(screen.getByRole('status', { name: 'Analyzing' })).toBeInTheDocument()
     await act(async () => {
@@ -2061,5 +2291,1129 @@ describe('Scanner states (Wave 3)', () => {
     })
     expect(await screen.findByText('Screw')).toBeInTheDocument()
     expect(screen.queryByText('Analyzing…')).not.toBeInTheDocument()
+  })
+})
+
+describe('Scanner freeze frame', () => {
+  async function waitForLive(): Promise<void> {
+    // Camera init is microtasks only (no timers), so this drains under
+    // both real and fake timers.
+    for (let i = 0; i < 100 && !screen.queryByText('LIVE'); i++) {
+      await act(async () => {})
+    }
+    expect(screen.getByText('LIVE')).toBeInTheDocument()
+  }
+
+  async function freezeFrame(): Promise<void> {
+    await waitForLive()
+    openOverflow()
+    fireEvent.click(screen.getByRole('switch', { name: 'Freeze frame' }))
+  }
+
+  function tapTarget(): HTMLElement {
+    return screen.getByLabelText('Frozen frame: circle or tap to identify a part')
+  }
+
+  function setTapRect(
+    el: HTMLElement,
+    rect: { left: number; top: number; width: number; height: number } = {
+      left: 0,
+      top: 0,
+      width: 640,
+      height: 480,
+    },
+  ): void {
+    Object.defineProperty(el, 'getBoundingClientRect', {
+      value: () => ({
+        ...rect,
+        x: rect.left,
+        y: rect.top,
+        right: rect.left + rect.width,
+        bottom: rect.top + rect.height,
+        toJSON: () => ({}),
+      }),
+      configurable: true,
+    })
+  }
+
+  function maskRecord(box: MaskRecord['box'], objectId = '0'): MaskRecord {
+    return {
+      frame: 0,
+      ordinal: 0,
+      objectId,
+      box,
+      raster: Uint8Array.from([1, 0, 0, 0]),
+    }
+  }
+
+  it('shows no tap layer while the feed is live', () => {
+    mockCamera(true)
+    render(<Scanner />)
+    expect(
+      screen.queryByLabelText('Frozen frame: circle or tap to identify a part'),
+    ).not.toBeInTheDocument()
+  })
+
+  it('freezing pauses the video and stops refresh ticks while masks persist', async () => {
+    vi.useFakeTimers()
+    const media = mockMediaControls()
+    try {
+      mockCamera(true)
+      vi.mocked(reasonSpatial).mockResolvedValue({
+        target_label: 'Screw',
+        approx_x: 10,
+        approx_y: 10,
+        speech_response: null,
+        display_mode: 'visual_only',
+      })
+      render(<Scanner />)
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('show screws')
+      })
+      expect(screen.getByText('Screw')).toBeInTheDocument()
+      expect(segmentImage).toHaveBeenCalledTimes(1)
+      media.pause.mockClear()
+      await freezeFrame()
+      expect(media.pause).toHaveBeenCalledTimes(1)
+      expect(screen.getByText('FROZEN')).toBeInTheDocument()
+      expect(screen.queryByText('LIVE')).not.toBeInTheDocument()
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10000)
+      })
+      expect(segmentImage).toHaveBeenCalledTimes(1)
+      expect(screen.getByText('Screw')).toBeInTheDocument()
+    } finally {
+      media.restore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('resuming plays the video and re-arms refresh for the tracked target', async () => {
+    vi.useFakeTimers()
+    const media = mockMediaControls()
+    try {
+      mockCamera(true)
+      vi.mocked(reasonSpatial).mockResolvedValue({
+        target_label: 'Screw',
+        approx_x: 10,
+        approx_y: 10,
+        speech_response: null,
+        display_mode: 'visual_only',
+      })
+      render(<Scanner />)
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('show screws')
+      })
+      await freezeFrame()
+      expect(screen.getByText('FROZEN')).toBeInTheDocument()
+      media.play.mockClear()
+      fireEvent.click(screen.getByRole('switch', { name: 'Freeze frame' }))
+      expect(media.play).toHaveBeenCalledTimes(1)
+      expect(screen.queryByText('FROZEN')).not.toBeInTheDocument()
+      expect(segmentImage).toHaveBeenCalledTimes(1)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2100)
+      })
+      expect(segmentImage).toHaveBeenCalledTimes(2)
+    } finally {
+      media.restore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('resuming without a tracked target does not re-arm refresh', async () => {
+    vi.useFakeTimers()
+    const media = mockMediaControls()
+    try {
+      mockCamera(true)
+      render(<Scanner />)
+      await freezeFrame()
+      fireEvent.click(screen.getByRole('switch', { name: 'Freeze frame' }))
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10000)
+      })
+      expect(segmentImage).not.toHaveBeenCalled()
+    } finally {
+      media.restore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('outlines the tapped part, names it, speaks it, and pushes memory', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      fireEvent.click(screen.getByRole('switch', { name: 'Voice mode' }))
+      await act(async () => {})
+      const layer = tapTarget()
+      expect(layer).toHaveClass('cursor-crosshair', 'z-[5]')
+      setTapRect(layer)
+      vi.mocked(parseSamStream).mockResolvedValueOnce([
+        maskRecord({ x1: 300, y1: 200, x2: 340, y2: 240, w: 41, h: 41 }),
+        maskRecord({ x1: 0, y1: 0, x2: 9, y2: 9, w: 10, h: 10 }, '1'),
+      ])
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 320, clientY: 220 })
+      })
+      expect(segmentImage).toHaveBeenCalledWith('data:image/jpeg;base64,AAA', 'tapped part', {
+        x: 320,
+        y: 220,
+        width: 640,
+        height: 480,
+      })
+      // The largest mask wins the crop.
+      expect(cropRegion).toHaveBeenCalledTimes(1)
+      expect(vi.mocked(cropRegion).mock.calls[0][1]).toEqual({
+        x1: 300,
+        y1: 200,
+        x2: 340,
+        y2: 240,
+        w: 41,
+        h: 41,
+      })
+      expect(identifyComponent).toHaveBeenCalledWith('data:image/jpeg;base64,CROP')
+      const pill = await screen.findByText('M6 hex bolt')
+      expect(pill.getAttribute('style')).toContain('left: 50%')
+      expect(speakText).toHaveBeenCalledWith('M6 hex bolt')
+      expect(assistants[0].pushMemory).toHaveBeenCalledWith({
+        phrase: 'tap to outline',
+        label: 'M6 hex bolt',
+        x: 50,
+        y: (220 / 480) * 100,
+      })
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('keeps a cyan outline with fallback speech for unknown parts', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      vi.mocked(identifyComponent).mockResolvedValue('')
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      fireEvent.click(screen.getByRole('switch', { name: 'Voice mode' }))
+      await act(async () => {})
+      const layer = tapTarget()
+      setTapRect(layer)
+      vi.mocked(parseSamStream).mockResolvedValueOnce([
+        maskRecord({ x1: 300, y1: 200, x2: 340, y2: 240, w: 41, h: 41 }),
+      ])
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 320, clientY: 220 })
+      })
+      const pill = await screen.findByText('Unknown part')
+      const style = pill.querySelector('span')?.getAttribute('style') ?? ''
+      expect(style.includes('#00ffff') || style.includes('rgb(0, 255, 255)')).toBe(true)
+      const calls = vi.mocked(speakText).mock.calls
+      expect(calls[calls.length - 1][0]).toContain('could not identify')
+      expect(assistants[0].pushMemory).toHaveBeenCalledWith({
+        phrase: 'tap to outline',
+        label: 'Unknown part',
+        x: 50,
+        y: (220 / 480) * 100,
+      })
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('falls back to a tap-centered crop when SAM returns no masks', async () => {
+    const strokeRect = vi.fn()
+    const ctx = new Proxy(
+      { marker: 'ctx', strokeRect, measureText: () => ({ width: 10 }) },
+      {
+        get: (target, prop) => {
+          if (prop === 'createImageData') {
+            return (w: number, h: number) => ({
+              data: new Uint8ClampedArray(w * h * 4),
+              width: w,
+              height: h,
+            })
+          }
+          return (target as Record<PropertyKey, unknown>)[prop] ?? (() => undefined)
+        },
+        set: () => true,
+      },
+    )
+    const ctxSpy = vi
+      .spyOn(window.HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue(ctx as unknown as CanvasRenderingContext2D)
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      vi.mocked(identifyComponent).mockResolvedValue('Blend door')
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      fireEvent.click(screen.getByRole('switch', { name: 'Voice mode' }))
+      await act(async () => {})
+      const layer = tapTarget()
+      setTapRect(layer)
+      vi.mocked(parseSamStream).mockResolvedValueOnce([])
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 320, clientY: 220 })
+      })
+      expect(await screen.findByText('Blend door')).toBeInTheDocument()
+      expect(cropRegion).toHaveBeenCalledTimes(1)
+      const box = vi.mocked(cropRegion).mock.calls[0][1] as MaskRecord['box']
+      expect(box.x1).toBeLessThanOrEqual(320)
+      expect(box.x2).toBeGreaterThanOrEqual(320)
+      expect(box.y1).toBeLessThanOrEqual(220)
+      expect(box.y2).toBeGreaterThanOrEqual(220)
+      expect(strokeRect).toHaveBeenCalled()
+      expect(speakText).toHaveBeenCalledWith('Blend door')
+    } finally {
+      media.restore()
+      ctxSpy.mockRestore()
+    }
+  })
+
+  it('removes one outline on a 500ms long-press without re-segmenting', async () => {
+    vi.useFakeTimers()
+    const media = mockMediaControls()
+    try {
+      mockCamera(true)
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      const layer = tapTarget()
+      setTapRect(layer)
+      vi.mocked(parseSamStream).mockResolvedValueOnce([
+        maskRecord({ x1: 300, y1: 200, x2: 340, y2: 240, w: 41, h: 41 }),
+      ])
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 320, clientY: 220 })
+      })
+      expect(screen.getByText('M6 hex bolt')).toBeInTheDocument()
+      const segments = vi.mocked(segmentImage).mock.calls.length
+      await act(async () => {
+        fireEvent.pointerDown(layer, { clientX: 320, clientY: 220 })
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500)
+      })
+      await act(async () => {
+        fireEvent.pointerUp(layer, { clientX: 320, clientY: 220 })
+      })
+      // The release click is consumed by the long-press.
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 320, clientY: 220 })
+      })
+      expect(segmentImage).toHaveBeenCalledTimes(segments)
+      expect(screen.queryByText('M6 hex bolt')).not.toBeInTheDocument()
+    } finally {
+      media.restore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('cancels the long-press when the finger drifts', async () => {
+    vi.useFakeTimers()
+    const media = mockMediaControls()
+    try {
+      mockCamera(true)
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      const layer = tapTarget()
+      setTapRect(layer)
+      vi.mocked(parseSamStream).mockResolvedValue([
+        maskRecord({ x1: 300, y1: 200, x2: 340, y2: 240, w: 41, h: 41 }),
+      ])
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 320, clientY: 220 })
+      })
+      expect(screen.getByText('M6 hex bolt')).toBeInTheDocument()
+      const segments = vi.mocked(segmentImage).mock.calls.length
+      await act(async () => {
+        fireEvent.pointerDown(layer, { clientX: 320, clientY: 220 })
+      })
+      await act(async () => {
+        fireEvent.pointerMove(layer, { clientX: 335, clientY: 220 })
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000)
+      })
+      await act(async () => {
+        fireEvent.pointerUp(layer, { clientX: 335, clientY: 220 })
+      })
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 335, clientY: 220 })
+      })
+      // No removal; the drifted release is neither a tap nor a circle.
+      expect(segmentImage).toHaveBeenCalledTimes(segments)
+      expect(screen.getByText('M6 hex bolt')).toBeInTheDocument()
+    } finally {
+      media.restore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not fetch guides for frozen-frame taps', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      const layer = tapTarget()
+      setTapRect(layer)
+      vi.mocked(parseSamStream).mockResolvedValueOnce([
+        maskRecord({ x1: 300, y1: 200, x2: 340, y2: 240, w: 41, h: 41 }),
+      ])
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 320, clientY: 220 })
+      })
+      expect(await screen.findByText('M6 hex bolt')).toBeInTheDocument()
+      expect(searchGuides).not.toHaveBeenCalled()
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('numbers re-added outlines uniquely after a removal', async () => {
+    vi.useFakeTimers()
+    const media = mockMediaControls()
+    const fillText = vi.fn()
+    const ctx = new Proxy(
+      { marker: 'ctx', fillText, measureText: () => ({ width: 10 }) },
+      {
+        get: (target, prop) => {
+          if (prop === 'createImageData') {
+            return (w: number, h: number) => ({
+              data: new Uint8ClampedArray(w * h * 4),
+              width: w,
+              height: h,
+            })
+          }
+          const value = (target as Record<PropertyKey, unknown>)[prop]
+          return value ?? (() => undefined)
+        },
+        set: () => true,
+      },
+    )
+    const ctxSpy = vi
+      .spyOn(window.HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue(ctx as unknown as CanvasRenderingContext2D)
+    try {
+      mockCamera(true)
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      const layer = tapTarget()
+      setTapRect(layer)
+      vi.mocked(parseSamStream)
+        .mockResolvedValueOnce([
+          maskRecord({ x1: 300, y1: 200, x2: 340, y2: 240, w: 41, h: 41 }),
+        ])
+        .mockResolvedValueOnce([
+          maskRecord({ x1: 80, y1: 80, x2: 120, y2: 120, w: 41, h: 41 }),
+        ])
+        .mockResolvedValueOnce([
+          maskRecord({ x1: 500, y1: 300, x2: 540, y2: 340, w: 41, h: 41 }),
+        ])
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 320, clientY: 220 })
+      })
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 100, clientY: 100 })
+      })
+      await act(async () => {
+        fireEvent.pointerDown(layer, { clientX: 320, clientY: 220 })
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500)
+      })
+      await act(async () => {
+        fireEvent.pointerUp(layer, { clientX: 320, clientY: 220 })
+      })
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 320, clientY: 220 })
+      })
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 520, clientY: 320 })
+      })
+      expect(fillText).toHaveBeenCalledWith('3', expect.any(Number), expect.any(Number))
+    } finally {
+      ctxSpy.mockRestore()
+      media.restore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('ignores taps while a tap analysis is in flight', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      let release!: (value: MaskRecord[]) => void
+      vi.mocked(parseSamStream).mockImplementationOnce(
+        () =>
+          new Promise<MaskRecord[]>((resolve) => {
+            release = resolve
+          }),
+      )
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      const layer = tapTarget()
+      setTapRect(layer)
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 320, clientY: 220 })
+      })
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 100, clientY: 100 })
+      })
+      expect(segmentImage).toHaveBeenCalledTimes(1)
+      await act(async () => {
+        release([])
+      })
+      expect(await screen.findByText('M6 hex bolt')).toBeInTheDocument()
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('ignores taps without an API key', async () => {
+    vi.stubEnv('VITE_META_MODEL_API_KEY', '')
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      const layer = tapTarget()
+      setTapRect(layer)
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 320, clientY: 220 })
+      })
+      expect(segmentImage).not.toHaveBeenCalled()
+      expect(identifyComponent).not.toHaveBeenCalled()
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('resumes the feed when flipping cameras while frozen', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      render(<Scanner />)
+      expect(await screen.findByText('LIVE')).toBeInTheDocument()
+      await freezeFrame()
+      expect(media.pause).toHaveBeenCalledTimes(1)
+      expect(screen.getByText('FROZEN')).toBeInTheDocument()
+      media.play.mockClear()
+      fireEvent.click(screen.getByRole('button', { name: 'Switch camera' }))
+      expect(media.play).toHaveBeenCalled()
+      expect(screen.queryByText('FROZEN')).not.toBeInTheDocument()
+      expect(await screen.findByText('LIVE')).toBeInTheDocument()
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('moves through analyzing, speaking, and listening on a tap', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      let releaseMasks!: (value: MaskRecord[]) => void
+      vi.mocked(parseSamStream).mockImplementationOnce(
+        () =>
+          new Promise<MaskRecord[]>((resolve) => {
+            releaseMasks = resolve
+          }),
+      )
+      let releaseSpeak!: () => void
+      vi.mocked(speakText).mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseSpeak = resolve
+          }),
+      )
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      openOverflow()
+      fireEvent.click(screen.getByRole('switch', { name: 'Voice mode' }))
+      expect(await screen.findByText('[ 🟢 LISTENING... ]')).toBeInTheDocument()
+      await waitForLive()
+      fireEvent.click(screen.getByRole('switch', { name: 'Freeze frame' }))
+      const layer = tapTarget()
+      setTapRect(layer)
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 320, clientY: 220 })
+      })
+      expect(screen.getByRole('status', { name: 'Analyzing' })).toBeInTheDocument()
+      await act(async () => {
+        releaseMasks([maskRecord({ x1: 300, y1: 200, x2: 340, y2: 240, w: 41, h: 41 })])
+      })
+      expect(await screen.findByText('[ 🔊 SPEAKING... ]')).toBeInTheDocument()
+      await act(async () => {
+        releaseSpeak()
+      })
+      expect(await screen.findByText('[ 🟢 LISTENING... ]')).toBeInTheDocument()
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('maps taps through the zoom stage to the tapped media pixel', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      wheelZoomIn()
+      // 1.2x: the 640x480 view reports a 768x576 transformed box.
+      const layer = tapTarget()
+      setTapRect(layer, { left: 0, top: 0, width: 768, height: 576 })
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 384, clientY: 288 })
+      })
+      expect(segmentImage).toHaveBeenCalledWith(
+        'data:image/jpeg;base64,AAA',
+        'tapped part',
+        { x: 320, y: 240, width: 640, height: 480 },
+      )
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('suppresses the tap when a zoomed drag traces instead', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      wheelZoomIn()
+      const layer = tapTarget()
+      setTapRect(layer)
+      fireEvent.pointerDown(layer, { pointerId: 1, clientX: 320, clientY: 220 })
+      fireEvent.pointerMove(layer, { pointerId: 1, clientX: 200, clientY: 220 })
+      fireEvent.pointerUp(layer, { pointerId: 1, clientX: 200, clientY: 220 })
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 200, clientY: 220 })
+      })
+      expect(segmentImage).not.toHaveBeenCalled()
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('still outlines when the drift stays below the pan threshold', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      wheelZoomIn()
+      const layer = tapTarget()
+      setTapRect(layer, { left: 0, top: 0, width: 768, height: 576 })
+      fireEvent.pointerDown(layer, { pointerId: 1, clientX: 384, clientY: 288 })
+      fireEvent.pointerMove(layer, { pointerId: 1, clientX: 388, clientY: 288 })
+      fireEvent.pointerUp(layer, { pointerId: 1, clientX: 388, clientY: 288 })
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 388, clientY: 288 })
+      })
+      expect(segmentImage).toHaveBeenCalledTimes(1)
+    } finally {
+      media.restore()
+    }
+  })
+
+  function setStageDims(w: number, h: number): void {
+    const stage = screen.getByTestId('zoom-stage')
+    Object.defineProperty(stage, 'clientWidth', { value: w, configurable: true })
+    Object.defineProperty(stage, 'clientHeight', { value: h, configurable: true })
+  }
+
+  function setStageRect(rect: { left: number; top: number; width: number; height: number }): void {
+    const stage = screen.getByTestId('zoom-stage')
+    Object.defineProperty(stage, 'getBoundingClientRect', {
+      value: () => ({
+        ...rect,
+        x: rect.left,
+        y: rect.top,
+        right: rect.left + rect.width,
+        bottom: rect.top + rect.height,
+        toJSON: () => ({}),
+      }),
+      configurable: true,
+    })
+  }
+
+  function traceLoop(layer: HTMLElement, x1: number, y1: number, x2: number, y2: number): void {
+    fireEvent.pointerDown(layer, { pointerId: 1, clientX: x1, clientY: y1 })
+    fireEvent.pointerMove(layer, { pointerId: 1, clientX: x2, clientY: y1 })
+    fireEvent.pointerMove(layer, { pointerId: 1, clientX: x2, clientY: y2 })
+    fireEvent.pointerMove(layer, { pointerId: 1, clientX: x1, clientY: y2 })
+    fireEvent.pointerMove(layer, { pointerId: 1, clientX: x1, clientY: y1 })
+    fireEvent.pointerUp(layer, { pointerId: 1, clientX: x1, clientY: y1 })
+  }
+
+  it('identifies the circled region with a box prompt', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      setStageDims(320, 240)
+      const layer = tapTarget()
+      setTapRect(layer)
+      await act(async () => {
+        traceLoop(layer, 100, 100, 200, 200)
+      })
+      expect(segmentImage).toHaveBeenCalledWith(
+        'data:image/jpeg;base64,AAA',
+        'circled part',
+        undefined,
+        { x1: 200, y1: 200, x2: 400, y2: 400, width: 640, height: 480 },
+      )
+      expect(cropRegion).toHaveBeenCalledWith(
+        expect.anything(),
+        { x1: 200, y1: 200, x2: 400, y2: 400 },
+        0.2,
+      )
+      expect(await screen.findByText('M6 hex bolt')).toBeInTheDocument()
+      expect(assistants[0].pushMemory).toHaveBeenCalledWith({
+        phrase: 'circle to identify',
+        label: 'M6 hex bolt',
+        x: 46.875,
+        y: 62.5,
+      })
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('draws the trace trail while circling and clears it on release', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      setStageDims(320, 240)
+      const layer = tapTarget()
+      fireEvent.pointerDown(layer, { pointerId: 1, clientX: 100, clientY: 100 })
+      fireEvent.pointerMove(layer, { pointerId: 1, clientX: 200, clientY: 100 })
+      const trail = screen.getByTestId('trace-trail')
+      expect(trail.querySelector('polyline')?.getAttribute('points')).toBe(
+        '100.0,100.0 200.0,100.0',
+      )
+      await act(async () => {
+        fireEvent.pointerUp(layer, { pointerId: 1, clientX: 200, clientY: 100 })
+      })
+      expect(screen.queryByTestId('trace-trail')).not.toBeInTheDocument()
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('maps the circled region through the zoom stage', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      setStageDims(320, 240)
+      wheelZoomIn()
+      // 1.2x around (100,100) pans to (-20,-20): the transformed box
+      // starts there at 384x288.
+      setStageRect({ left: -20, top: -20, width: 384, height: 288 })
+      const layer = tapTarget()
+      await act(async () => {
+        traceLoop(layer, 100, 100, 220, 220)
+      })
+      // Client coords divide back to the (100,100)-(200,200) loop.
+      expect(segmentImage).toHaveBeenCalledWith(
+        'data:image/jpeg;base64,AAA',
+        'circled part',
+        undefined,
+        { x1: 200, y1: 200, x2: 400, y2: 400, width: 640, height: 480 },
+      )
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('cancels the circle when a second finger starts a pinch', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      setStageDims(320, 240)
+      const layer = tapTarget()
+      fireEvent.pointerDown(layer, { pointerId: 1, clientX: 100, clientY: 100 })
+      fireEvent.pointerMove(layer, { pointerId: 1, clientX: 200, clientY: 100 })
+      expect(screen.getByTestId('trace-trail')).toBeInTheDocument()
+      fireEvent.pointerDown(layer, { pointerId: 2, clientX: 250, clientY: 100 })
+      expect(screen.queryByTestId('trace-trail')).not.toBeInTheDocument()
+      fireEvent.pointerMove(layer, { pointerId: 2, clientX: 300, clientY: 100 })
+      fireEvent.pointerUp(layer, { pointerId: 2, clientX: 300, clientY: 100 })
+      fireEvent.pointerUp(layer, { pointerId: 1, clientX: 200, clientY: 100 })
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 200, clientY: 100 })
+      })
+      expect(segmentImage).not.toHaveBeenCalled()
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('retries a failed tap identify with a wide-context crop', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      vi.mocked(identifyComponent).mockRejectedValueOnce(new Error('boom'))
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      const layer = tapTarget()
+      setTapRect(layer)
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 320, clientY: 220 })
+      })
+      expect(await screen.findByText('M6 hex bolt')).toBeInTheDocument()
+      expect(identifyComponent).toHaveBeenCalledTimes(2)
+      expect(vi.mocked(cropRegion).mock.calls[1][2]).toBe(1.0)
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('shows the circle hint while frozen and hides it when live', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      render(<Scanner />)
+      expect(screen.queryByText('Drag to circle a part · tap to identify')).not.toBeInTheDocument()
+      await freezeFrame()
+      expect(screen.getByText('Drag to circle a part · tap to identify')).toBeInTheDocument()
+      fireEvent.click(screen.getByRole('switch', { name: 'Freeze frame' }))
+      expect(await screen.findByText('LIVE')).toBeInTheDocument()
+      expect(screen.queryByText('Drag to circle a part · tap to identify')).not.toBeInTheDocument()
+    } finally {
+      media.restore()
+    }
+  })
+})
+
+describe('Scanner zoom', () => {
+  function stageStyle(): string {
+    return screen.getByTestId('zoom-stage').getAttribute('style') ?? ''
+  }
+
+  it('clamps gesture zoom at 4x', () => {
+    mockCamera(true)
+    render(<Scanner />)
+    wheelZoomIn(8)
+    expect(stageStyle()).toContain('scale(4)')
+  })
+
+  it('zooms at the cursor with the wheel and ignores ctrl-wheel', () => {
+    mockCamera(true)
+    render(<Scanner />)
+    const stage = screen.getByTestId('zoom-stage')
+    fireEvent.wheel(stage, { deltaY: -100, clientX: 100, clientY: 100 })
+    expect(stageStyle()).toContain('scale(1.2)')
+    // jsdom has no WheelEvent: the fallback Event drops ctrlKey, so set it
+    // explicitly to exercise the browser page-zoom passthrough branch.
+    const ctrlWheel = createEvent.wheel(stage, { deltaY: -100, clientX: 100, clientY: 100 })
+    Object.defineProperty(ctrlWheel, 'ctrlKey', { value: true })
+    fireEvent(stage, ctrlWheel)
+    expect(stageStyle()).toContain('scale(1.2)')
+    fireEvent.wheel(stage, { deltaY: 100, clientX: 100, clientY: 100 })
+    expect(stageStyle()).toContain('scale(1)')
+  })
+
+  it('pinch-zooms around the gesture midpoint', () => {
+    mockCamera(true)
+    render(<Scanner />)
+    const stage = screen.getByTestId('zoom-stage')
+    fireEvent.pointerDown(stage, { pointerId: 1, clientX: 100, clientY: 100 })
+    fireEvent.pointerDown(stage, { pointerId: 2, clientX: 200, clientY: 100 })
+    fireEvent.pointerMove(stage, { pointerId: 2, clientX: 300, clientY: 100 })
+    expect(stageStyle()).toContain('scale(2)')
+    fireEvent.pointerUp(stage, { pointerId: 2, clientX: 300, clientY: 100 })
+    fireEvent.pointerUp(stage, { pointerId: 1, clientX: 100, clientY: 100 })
+  })
+
+  it('resets zoom when switching cameras', async () => {
+    mockCamera(true)
+    render(<Scanner />)
+    wheelZoomIn()
+    expect(stageStyle()).toContain('scale(1.2)')
+    openOverflow()
+    fireEvent.click(screen.getByRole('button', { name: 'Switch camera' }))
+    await waitFor(() => expect(stageStyle()).toContain('scale(1)'))
+  })
+
+  it('keeps zoom across freeze and unfreeze', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      render(<Scanner />)
+      expect(await screen.findByText('LIVE')).toBeInTheDocument()
+      wheelZoomIn()
+      openOverflow()
+      const freeze = screen.getByRole('switch', { name: 'Freeze frame' })
+      fireEvent.click(freeze)
+      expect(await screen.findByText('FROZEN')).toBeInTheDocument()
+      expect(stageStyle()).toContain('scale(1.2)')
+      fireEvent.click(freeze)
+      expect(await screen.findByText('LIVE')).toBeInTheDocument()
+      expect(stageStyle()).toContain('scale(1.2)')
+    } finally {
+      media.restore()
+    }
+  })
+})
+
+describe('tapToMedia', () => {
+  it('maps centered taps without cropping', () => {
+    expect(
+      tapToMedia(160, 120, { left: 0, top: 0, width: 320, height: 240 }, 640, 480),
+    ).toEqual({
+      point: { x: 320, y: 240, width: 640, height: 480 },
+      x: 50,
+      y: 50,
+    })
+  })
+
+  it('inverts the centered crop of a portrait frame in a landscape view', () => {
+    const tap = tapToMedia(200, 150, { left: 0, top: 0, width: 400, height: 300 }, 480, 640)
+    expect(tap?.point).toEqual({ x: 240, y: 320, width: 480, height: 640 })
+    expect(tap?.x).toBe(50)
+    expect(tap?.y).toBe(50)
+  })
+
+  it('inverts the centered crop of a landscape frame in a portrait view', () => {
+    const tap = tapToMedia(150, 200, { left: 0, top: 0, width: 300, height: 400 }, 640, 480)
+    expect(tap?.point).toEqual({ x: 320, y: 240, width: 640, height: 480 })
+    expect(tap?.x).toBe(50)
+    expect(tap?.y).toBe(50)
+  })
+
+  it('clamps out-of-frame taps into the media bounds', () => {
+    expect(
+      tapToMedia(-50, 1000, { left: 0, top: 0, width: 320, height: 240 }, 640, 480),
+    ).toEqual({
+      point: { x: 0, y: 479, width: 640, height: 480 },
+      x: 0,
+      y: 100,
+    })
+  })
+
+  it('returns undefined without media or element dimensions', () => {
+    const rect = { left: 0, top: 0, width: 320, height: 240 }
+    expect(tapToMedia(10, 10, rect, 0, 480)).toBeUndefined()
+    expect(tapToMedia(10, 10, rect, 640, 0)).toBeUndefined()
+    expect(
+      tapToMedia(10, 10, { left: 0, top: 0, width: 0, height: 240 }, 640, 480),
+    ).toBeUndefined()
+  })
+
+  it('treats an explicit 1x stage scale as the identity', () => {
+    expect(
+      tapToMedia(160, 120, { left: 0, top: 0, width: 320, height: 240 }, 640, 480, 1),
+    ).toEqual({
+      point: { x: 320, y: 240, width: 640, height: 480 },
+      x: 50,
+      y: 50,
+    })
+  })
+
+  it('inverts the stage scale for a zoomed, unpanned view', () => {
+    // 320x240 view at 2x: the 640x480 transformed box shows media center-left.
+    const tap = tapToMedia(320, 240, { left: 0, top: 0, width: 640, height: 480 }, 640, 480, 2)
+    expect(tap?.point).toEqual({ x: 320, y: 240, width: 640, height: 480 })
+    expect(tap?.x).toBe(50)
+    expect(tap?.y).toBe(50)
+  })
+
+  it('resolves taps under zoom with pan from the transformed rect', () => {
+    // Same 2x stage panned 100px left: client (60, 120) sits a quarter across.
+    const tap = tapToMedia(60, 120, { left: -100, top: 0, width: 640, height: 480 }, 640, 480, 2)
+    expect(tap?.point).toEqual({ x: 160, y: 120, width: 640, height: 480 })
+    expect(tap?.x).toBe(25)
+    expect(tap?.y).toBe(25)
+  })
+
+  it('combines the stage scale with the object-cover crop', () => {
+    // Portrait 480x640 frame in a 400x300 view at 2x (800x600 transformed).
+    const tap = tapToMedia(400, 300, { left: 0, top: 0, width: 800, height: 600 }, 480, 640, 2)
+    expect(tap?.point).toEqual({ x: 240, y: 320, width: 480, height: 640 })
+    expect(tap?.x).toBe(50)
+    expect(tap?.y).toBe(50)
+  })
+
+  it('returns undefined for a non-positive stage scale', () => {
+    const rect = { left: 0, top: 0, width: 640, height: 480 }
+    expect(tapToMedia(10, 10, rect, 640, 480, 0)).toBeUndefined()
+    expect(tapToMedia(10, 10, rect, 640, 480, -2)).toBeUndefined()
+  })
+})
+
+describe('clampZoomPan', () => {
+  it('pins pan to zero at 1x', () => {
+    expect(clampZoomPan(1, -50, -30, 320, 240)).toEqual({ scale: 1, x: 0, y: 0 })
+  })
+
+  it('clamps the scale to the 1-4x range', () => {
+    expect(clampZoomPan(0.5, 0, 0, 320, 240).scale).toBe(1)
+    expect(clampZoomPan(9, 0, 0, 320, 240).scale).toBe(4)
+  })
+
+  it('keeps the scaled content covering the viewport', () => {
+    // 320x240 at 2x spans [-320, 0] x [-240, 0].
+    expect(clampZoomPan(2, 40, 30, 320, 240)).toEqual({ scale: 2, x: 0, y: 0 })
+    expect(clampZoomPan(2, -400, -300, 320, 240)).toEqual({ scale: 2, x: -320, y: -240 })
+    expect(clampZoomPan(2, -100, -100, 320, 240)).toEqual({ scale: 2, x: -100, y: -100 })
+  })
+
+  it('zeroes pan when the viewport is unknown', () => {
+    expect(clampZoomPan(2, -100, -100, 0, 0)).toEqual({ scale: 2, x: 0, y: 0 })
+  })
+
+  it('snaps float dust back to exactly 1x', () => {
+    expect(clampZoomPan(1.2 * (1 / 1.2), -50, -30, 320, 240)).toEqual({
+      scale: 1,
+      x: 0,
+      y: 0,
+    })
+  })
+})
+
+describe('zoomAt', () => {
+  it('zooms around the focal point, keeping its content fixed', () => {
+    expect(zoomAt({ scale: 1, x: 0, y: 0 }, 2, 100, 100, 320, 240)).toEqual({
+      scale: 2,
+      x: -100,
+      y: -100,
+    })
+  })
+
+  it('returns to the origin when zooming back out to 1x', () => {
+    expect(zoomAt({ scale: 2, x: -100, y: -100 }, 0.5, 100, 100, 320, 240)).toEqual({
+      scale: 1,
+      x: 0,
+      y: 0,
+    })
+  })
+
+  it('returns the same state when the factor hits a range limit', () => {
+    const zoomed = { scale: 4, x: -100, y: -100 }
+    expect(zoomAt(zoomed, 2, 100, 100, 320, 240)).toBe(zoomed)
+    const plain = { scale: 1, x: 0, y: 0 }
+    expect(zoomAt(plain, 0.5, 100, 100, 320, 240)).toBe(plain)
+  })
+})
+
+describe('stageBoxToMedia', () => {
+  it('maps a trace bbox through the cover inverse', () => {
+    expect(stageBoxToMedia(80, 60, 240, 180, 320, 240, 640, 480)).toEqual({
+      box: { x1: 160, y1: 120, x2: 480, y2: 360 },
+      x: 50,
+      y: 50,
+    })
+  })
+
+  it('orders reversed corners', () => {
+    expect(stageBoxToMedia(240, 180, 80, 60, 320, 240, 640, 480)?.box).toEqual({
+      x1: 160,
+      y1: 120,
+      x2: 480,
+      y2: 360,
+    })
+  })
+
+  it('clamps out-of-frame loops into the media bounds', () => {
+    expect(stageBoxToMedia(-100, -100, 1000, 1000, 320, 240, 640, 480)?.box).toEqual({
+      x1: 0,
+      y1: 0,
+      x2: 639,
+      y2: 479,
+    })
+  })
+
+  it('returns undefined without stage or media dimensions', () => {
+    expect(stageBoxToMedia(0, 0, 10, 10, 0, 240, 640, 480)).toBeUndefined()
+    expect(stageBoxToMedia(0, 0, 10, 10, 320, 240, 0, 480)).toBeUndefined()
+    expect(stageBoxToMedia(NaN, 0, 10, 10, 320, 240, 640, 480)).toBeUndefined()
+  })
+})
+
+describe('pinchZoom', () => {
+  it('matches zoomAt for a pure spread around a fixed midpoint', () => {
+    expect(pinchZoom({ scale: 1, x: 0, y: 0 }, 2, 100, 100, 100, 100, 320, 240)).toEqual({
+      scale: 2,
+      x: -100,
+      y: -100,
+    })
+  })
+
+  it('pans by the midpoint delta when the spread holds steady', () => {
+    expect(
+      pinchZoom({ scale: 2, x: -100, y: -100 }, 1, 150, 100, 200, 100, 320, 240),
+    ).toEqual({ scale: 2, x: -50, y: -100 })
+  })
+
+  it('combines spread and midpoint tracking in one step', () => {
+    expect(pinchZoom({ scale: 1, x: 0, y: 0 }, 2, 100, 100, 150, 150, 320, 240)).toEqual({
+      scale: 2,
+      x: -50,
+      y: -50,
+    })
+  })
+
+  it('clamps the pan into the covering range', () => {
+    const zoomed = pinchZoom({ scale: 2, x: -100, y: -100 }, 1, 100, 100, 1000, 100, 320, 240)
+    expect(zoomed).toEqual({ scale: 2, x: 0, y: -100 })
+  })
+})
+
+describe('identifyWithContext', () => {
+  const box = { x1: 10, y1: 20, x2: 30, y2: 40 }
+  const video = {} as HTMLVideoElement
+
+  it('returns the tight-crop name without a second attempt', async () => {
+    await expect(identifyWithContext(video, box)).resolves.toBe('M6 hex bolt')
+    expect(cropRegion).toHaveBeenCalledTimes(1)
+    expect(cropRegion).toHaveBeenCalledWith(video, box, 0.2)
+    expect(identifyComponent).toHaveBeenCalledTimes(1)
+  })
+
+  it('retries with a wide crop when the tight crop is unnamed', async () => {
+    vi.mocked(identifyComponent).mockResolvedValueOnce('')
+    await expect(identifyWithContext(video, box)).resolves.toBe('M6 hex bolt')
+    expect(cropRegion).toHaveBeenCalledTimes(2)
+    expect(cropRegion).toHaveBeenNthCalledWith(2, video, box, 1.0)
+    expect(identifyComponent).toHaveBeenCalledTimes(2)
+  })
+
+  it('retries with a wide crop when the tight attempt throws', async () => {
+    vi.mocked(identifyComponent).mockRejectedValueOnce(new Error('boom'))
+    await expect(identifyWithContext(video, box)).resolves.toBe('M6 hex bolt')
+    expect(identifyComponent).toHaveBeenCalledTimes(2)
+  })
+
+  it('returns empty only when both attempts miss', async () => {
+    vi.mocked(identifyComponent).mockResolvedValue('')
+    await expect(identifyWithContext(video, box)).resolves.toBe('')
+    expect(identifyComponent).toHaveBeenCalledTimes(2)
   })
 })

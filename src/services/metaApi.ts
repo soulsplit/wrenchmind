@@ -1,4 +1,4 @@
-import type { SpatialResult } from '../types'
+import type { MaskBox, SpatialResult } from '../types'
 import { buildObjectPrompt } from '@meta-sam/parser'
 import { logError, logWarn } from './logger'
 
@@ -43,15 +43,29 @@ async function fetchWithTimeout(
   }
 }
 
-/** Capture the current video frame as a base64 JPEG data URL. */
+/**
+ * Longest capture side sent to the APIs. The feed negotiates up to 4K for
+ * the zoomable display, but reason/segment/label calls need far less — cap
+ * here so a 3-frame burst doesn't upload ~10MB per query on mobile.
+ */
+export const API_CAPTURE_MAX_SIDE = 1920
+
+/**
+ * Capture the current video frame as a base64 JPEG data URL, downscaled to
+ * API_CAPTURE_MAX_SIDE on the longest side. Never upscales.
+ */
 export function captureVideoFrame(video: HTMLVideoElement): string {
   if (!video.videoWidth || !video.videoHeight) return ''
+  const scale = Math.min(
+    1,
+    API_CAPTURE_MAX_SIDE / Math.max(video.videoWidth, video.videoHeight),
+  )
   const c = document.createElement('canvas')
-  c.width = video.videoWidth
-  c.height = video.videoHeight
+  c.width = Math.max(1, Math.floor(video.videoWidth * scale))
+  c.height = Math.max(1, Math.floor(video.videoHeight * scale))
   const ctx = c.getContext('2d')
   if (!ctx) return ''
-  ctx.drawImage(video, 0, 0)
+  ctx.drawImage(video, 0, 0, c.width, c.height)
   return c.toDataURL('image/jpeg', 0.8)
 }
 
@@ -74,6 +88,39 @@ export function captureThumbnail(video: HTMLVideoElement, maxWidth = 320): strin
   if (!ctx) return ''
   ctx.drawImage(video, 0, 0, c.width, c.height)
   return c.toDataURL('image/jpeg', 0.7)
+}
+
+/**
+ * Crop a padded region around a mask box (inclusive corners) from the live
+ * video frame. The padded region clamps to the frame edges; empty when no
+ * frame is available. Same canvas/toDataURL shape as captureThumbnail, with
+ * a 9-arg drawImage selecting the source region.
+ */
+export function cropRegion(
+  video: HTMLVideoElement,
+  box: Pick<MaskBox, 'x1' | 'y1' | 'x2' | 'y2'>,
+  padFraction = 0.2,
+): string {
+  const vw = video.videoWidth
+  const vh = video.videoHeight
+  if (!vw || !vh) return ''
+  const w = Math.max(1, box.x2 - box.x1 + 1)
+  const h = Math.max(1, box.y2 - box.y1 + 1)
+  const padX = Math.floor(w * padFraction)
+  const padY = Math.floor(h * padFraction)
+  const sx = Math.min(vw - 1, Math.max(0, box.x1 - padX))
+  const sy = Math.min(vh - 1, Math.max(0, box.y1 - padY))
+  const ex = Math.min(vw - 1, Math.max(0, box.x2 + padX))
+  const ey = Math.min(vh - 1, Math.max(0, box.y2 + padY))
+  const sw = Math.max(1, ex - sx + 1)
+  const sh = Math.max(1, ey - sy + 1)
+  const c = document.createElement('canvas')
+  c.width = sw
+  c.height = sh
+  const ctx = c.getContext('2d')
+  if (!ctx) return ''
+  ctx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh)
+  return c.toDataURL('image/jpeg', 0.8)
 }
 
 /** Capture a short burst of frames; empty captures are dropped. */
@@ -176,8 +223,8 @@ export const MAX_LABEL_FINDINGS = 10
 
 /**
  * Transcribe the visible markings on an equipment label, rating plate, or
- * part. Returns one string per marking (part numbers, models, ratings,
- * serials first); empty when nothing is legible.
+ * part. Returns one verbatim string per line or field in reading order
+ * (key-value pairs kept together); empty when nothing is legible.
  */
 export async function extractLabelText(image: string): Promise<string[]> {
   const res = await fetchWithTimeout(
@@ -194,12 +241,15 @@ export async function extractLabelText(image: string): Promise<string[]> {
           {
             role: 'system',
             content:
-              'You are a label transcription assistant. Given an image of an equipment label, rating plate, or part marking, transcribe every visible marking. Return ONLY a JSON object: { "findings": string[] } — one entry per marking, part number, model, rating, or serial, most important first. Empty array when no text is legible.',
+              'You are a label transcription assistant. Given an image of an equipment label, rating plate, or part marking, transcribe every visible marking with character-exact fidelity. Return ONLY a JSON object: { "findings": string[] }. Rules: transcribe verbatim — preserve exact case, digits, punctuation, spacing, and units; never paraphrase, expand abbreviations, or invent characters. One entry per physical line or field; keep key-value pairs together on one entry (e.g. "MODEL ABC-123", "24V DC"). Read in top-to-bottom, left-to-right order. Examine small print and stamped, embossed, etched, or faded text closely, including edges and background markings. Join wrapped lines of a single field with one space. Include digits printed under barcodes. Use part-number context to disambiguate lookalike glyphs (0/O, 1/I/l, 5/S, 8/B). Skip illegible fragments rather than guessing. Empty array only when no text is legible at all.',
           },
           {
             role: 'user',
             content: [
-              { type: 'text', text: 'Transcribe all visible markings on this label.' },
+              {
+                type: 'text',
+                text: 'Transcribe all visible markings on this label, verbatim and character-exact, including small print.',
+              },
               { type: 'image_url', image_url: { url: image } },
             ],
           },
@@ -226,10 +276,71 @@ export async function extractLabelText(image: string): Promise<string[]> {
     .slice(0, MAX_LABEL_FINDINGS)
 }
 
+/** Max characters kept from a component identification label. */
+export const MAX_IDENTIFY_LABEL = 80
+
+/**
+ * Name the component visible in a cropped part image. Returns the short
+ * part name, capped; empty only when no mechanical part is visible at all
+ * (a generic category beats an empty label for downstream outline speech).
+ */
+export async function identifyComponent(image: string): Promise<string> {
+  const res = await fetchWithTimeout(
+    `${BASE}/chat/completions`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${key()}`,
+      },
+      body: JSON.stringify({
+        model: 'muse-spark-1.3',
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You are a component identification assistant. Given a cropped image of a mechanical part, name the component. Return ONLY a JSON object: { "label": string } — the short part name (e.g. "M6 hex bolt", "wiring harness connector"). If unsure of the exact part, return the closest generic category (e.g. "bolt", "electrical connector", "hose", "bracket") rather than an empty string. Empty string only when no mechanical part is visible at all.',
+          },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Name the component in this crop.' },
+              { type: 'image_url', image_url: { url: image } },
+            ],
+          },
+        ],
+        response_format: { type: 'json_object' },
+      }),
+    },
+    REASON_TIMEOUT_MS,
+    'muse-spark-identify',
+  )
+  if (!res.ok) {
+    const suffix = await errorDetail(res)
+    logError('api', `muse-spark request failed: HTTP ${res.status}${suffix}`)
+    throw new Error(`Muse Spark ${res.status}${suffix}`)
+  }
+  const data = await res.json()
+  const text = data.choices?.[0]?.message?.content ?? '{}'
+  const parsed = JSON.parse(text) as { label?: unknown }
+  if (typeof parsed.label !== 'string') return ''
+  return parsed.label.trim().slice(0, MAX_IDENTIFY_LABEL)
+}
+
 /** Point prompt in media pixels, per the SAM box/point prompt grammar. */
 export interface SamPointPrompt {
   x: number
   y: number
+  width: number
+  height: number
+}
+
+/** Box prompt in media pixels (inclusive corners); sent half-open. */
+export interface SamBoxPrompt {
+  x1: number
+  y1: number
+  x2: number
+  y2: number
   width: number
   height: number
 }
@@ -242,18 +353,62 @@ export interface SamStreamEvent {
 
 /**
  * Segment an image: concept phrase when only a label is known, a point
- * prompt when the target is already located, or one object per point for
- * plural targets — a single call isolates every instance. Yields raw
- * stream events for the SAM parser; use `parseSamStream` to consume them.
+ * prompt when the target is already located, a box prompt (plus its center
+ * point) for a circled region, or one object per point for plural targets
+ * — a single call isolates every instance. Yields raw stream events for
+ * the SAM parser; use `parseSamStream` to consume them.
  */
 export async function* segmentImage(
   imageBase64: string,
   nounPhrase: string,
   point?: SamPointPrompt | SamPointPrompt[],
+  box?: SamBoxPrompt,
 ): AsyncGenerator<SamStreamEvent> {
   const pts = Array.isArray(point) ? point : point ? [point] : []
-  const text =
-    pts.length > 0
+  const promptBox =
+    box &&
+    Number.isInteger(box.x1) &&
+    Number.isInteger(box.y1) &&
+    Number.isInteger(box.x2) &&
+    Number.isInteger(box.y2) &&
+    Number.isInteger(box.width) &&
+    Number.isInteger(box.height) &&
+    box.width > 0 &&
+    box.height > 0 &&
+    box.x1 >= 0 &&
+    box.y1 >= 0 &&
+    box.x1 < box.x2 &&
+    box.y1 < box.y2 &&
+    box.x2 < box.width &&
+    box.y2 < box.height
+      ? box
+      : undefined
+  const text = promptBox
+    ? buildObjectPrompt({
+        size: { width: promptBox.width, height: promptBox.height },
+        objects: [
+          {
+            id: 1,
+            prompts: [
+              {
+                box: {
+                  left: promptBox.x1,
+                  top: promptBox.y1,
+                  right: promptBox.x2 + 1,
+                  bottom: promptBox.y2 + 1,
+                },
+                points: [
+                  {
+                    x: Math.floor((promptBox.x1 + promptBox.x2) / 2),
+                    y: Math.floor((promptBox.y1 + promptBox.y2) / 2),
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      })
+    : pts.length > 0
       ? buildObjectPrompt({
           size: { width: pts[0].width, height: pts[0].height },
           objects: pts.map((p, i) => ({

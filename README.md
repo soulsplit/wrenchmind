@@ -41,7 +41,12 @@ and enable Pages with the **GitHub Actions** source in repo settings.
 
 - Full-viewport camera feed with transparent AR canvas; front/back switcher
   hides itself on single-camera devices, and a flashlight toggle appears
-  when the camera track reports torch support.
+  when the camera track reports torch support. Freeze frame stills the
+  feed for circle-to-search (drag to circle a part) and tap-to-identify
+  without re-segmentation. Identification retries a wide-context crop when
+  the tight crop is unnamed, and prefers a generic category over "unknown".
+  The feed negotiates up to 4K and zooms to 4x (pinch, mouse wheel)
+  on live and frozen frames; taps stay accurate while zoomed.
 - Color-coded overlays (cyan = component, yellow = connector, red =
   fastener) with callout pills; plural queries ("all the bolts") isolate
   every instance with numbered outlines. Overlays re-segment every 2 s so
@@ -51,10 +56,10 @@ and enable Pages with the **GitHub Actions** source in repo settings.
   answer by voice without re-marking.
 - Repair guidance card: step n-of-m with Back / Next Step buttons, specs
   (always flagged "verify against the manual"), tools, a warnings slot
-  that always renders, manual title, and source links. "Scan Another Part"
-  resets for the next part.
-- One-tap markdown repair-report export (steps with progress, specs,
-  warnings, sources, session log) and an in-app log with copy/download.
+  that always renders, manual title, source links, and matching iFixit
+  repair guides. "Scan Another Part" resets for the next part.
+- One-tap HTML repair-report export (steps with progress and photos,
+  specs, warnings, sources, session log) and an in-app log with copy/download.
 - Header badges: LIVE / NO FEED, front/rear camera, tracking lock, and
   status. Missing API key and camera/mic failures surface as plain-text
   errors with fixes.
@@ -66,6 +71,7 @@ and enable Pages with the **GitHub Actions** source in repo settings.
 | `npm run lint`    | ESLint over the repo                  |
 | `npm run build`   | Typecheck (`tsc -b`) + Vite build     |
 | `npm run preview` | Serve `dist/` locally (`--host`)      |
+| `npm run open`    | Build then serve `dist/` and open browser (`--host`) |
 
 ## Testing
 

@@ -23,6 +23,11 @@ interface HeaderProps {
   /** True when the active camera track reports torch capability. */
   hasTorch: boolean
   onTorchToggle: (next: boolean) => void
+  /** True while the frame is frozen for tap-to-outline work. */
+  frozen: boolean
+  onFreezeToggle: (next: boolean) => void
+  /** Optional instruction pill appended to the badge row; null hides it. */
+  hint?: string | null
 }
 
 /**
@@ -47,6 +52,9 @@ export default function Header({
   torchOn,
   hasTorch,
   onTorchToggle,
+  frozen,
+  onFreezeToggle,
+  hint,
 }: HeaderProps) {
   const [overflowOpen, setOverflowOpen] = useState(false)
 
@@ -88,6 +96,9 @@ export default function Header({
           {hasTorch && <Toggle checked={torchOn} onChange={onTorchToggle} label="Flashlight" />}
           <QrShare />
           <LogPanel />
+          {(live || frozen) && (
+            <Toggle checked={frozen} onChange={onFreezeToggle} label="Freeze frame" />
+          )}
           {multiCamera && (
             <button
               type="button"
@@ -121,17 +132,28 @@ export default function Header({
           paddingRight: 'max(1rem, env(safe-area-inset-right))',
         }}
       >
-        <span
-          className={`inline-flex items-center gap-1.5 rounded-full bg-black/70 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-white ${live ? '' : 'opacity-60'}`}
-          role="status"
-          aria-label={live ? 'Camera live' : 'Camera off air'}
-        >
+        {frozen ? (
           <span
-            className={`inline-block h-1.5 w-1.5 rounded-full ${live ? 'bg-red-500' : 'bg-white/30'}`}
-            aria-hidden="true"
-          />
-          {live ? 'LIVE' : 'NO FEED'}
-        </span>
+            className="inline-flex items-center gap-1.5 rounded-full bg-black/70 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-white"
+            role="status"
+            aria-label="Frame frozen"
+          >
+            <span className="inline-block h-1.5 w-1.5 rounded-full bg-amber-400" aria-hidden="true" />
+            FROZEN
+          </span>
+        ) : (
+          <span
+            className={`inline-flex items-center gap-1.5 rounded-full bg-black/70 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-white ${live ? '' : 'opacity-60'}`}
+            role="status"
+            aria-label={live ? 'Camera live' : 'Camera off air'}
+          >
+            <span
+              className={`inline-block h-1.5 w-1.5 rounded-full ${live ? 'bg-red-500' : 'bg-white/30'}`}
+              aria-hidden="true"
+            />
+            {live ? 'LIVE' : 'NO FEED'}
+          </span>
+        )}
         {live && (
           <span className="inline-flex items-center rounded-full bg-black/70 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-white">
             {facing === 'environment'
@@ -148,6 +170,11 @@ export default function Header({
           </span>
         )}
         <StatusBar status={status} />
+        {hint && (
+          <span className="inline-flex items-center rounded-full bg-black/70 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-cyan-200">
+            {hint}
+          </span>
+        )}
       </div>
     </header>
   )

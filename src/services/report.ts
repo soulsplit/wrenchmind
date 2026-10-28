@@ -15,76 +15,114 @@ export interface ReportInput {
 /** Max checkpoint photos embedded per report; data URLs bloat fast. */
 export const MAX_REPORT_PHOTOS = 10
 
+/** Escape dynamic text for HTML content and double-quoted attributes. */
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+const REPORT_CSS = [
+  'body{font-family:system-ui,sans-serif;max-width:720px;margin:0 auto;padding:24px;color:#111;background:#fff}',
+  'h1{font-size:1.5rem}h2{font-size:1.25rem;margin-top:1.5em}h3{font-size:1.05rem;margin-top:1.25em;color:#333}',
+  '.meta{color:#555}.print-hint{color:#777;font-size:.9rem}',
+  'img{max-width:100%;border:1px solid #ccc;border-radius:8px}',
+  '.warning{color:#8a5a00}pre{background:#f4f4f4;padding:12px;border-radius:8px;overflow-x:auto;font-size:.8rem}',
+  '@media print{.print-hint{display:none}body{padding:0}}',
+].join('')
+
 /**
- * Build a markdown repair report: the procedure with step progress plus
- * the session log. Debug chatter is dropped; info/warn/error stays.
+ * Build a self-contained HTML repair report: the procedure with step
+ * progress and checkpoint photos, plus the session log. Debug chatter is
+ * dropped; info/warn/error stays. Static file, no scripts.
  */
 export function buildReport({ guidance, stepIndex, workingOn, findings, photos }: ReportInput): string {
-  const lines: string[] = [
-    '# WrenchMind Repair Report',
-    `Generated: ${new Date().toISOString()}`,
-    `Working on: ${workingOn && workingOn.length > 0 ? workingOn.join(', ') : 'not established'}`,
-    '',
+  const esc = escapeHtml
+  const out: string[] = [
+    '<!DOCTYPE html>',
+    '<html lang="en">',
+    '<head>',
+    '<meta charset="utf-8">',
+    '<title>WrenchMind Repair Report</title>',
+    `<style>${REPORT_CSS}</style>`,
+    '</head>',
+    '<body>',
+    '<h1>WrenchMind Repair Report</h1>',
+    `<p class="meta">Generated: ${esc(new Date().toISOString())}</p>`,
+    `<p class="meta">Working on: ${workingOn && workingOn.length > 0 ? esc(workingOn.join(', ')) : 'not established'}</p>`,
+    '<p class="print-hint">Tip: Print → Save as PDF for a PDF copy.</p>',
   ]
   if (!guidance) {
-    lines.push('No repair guidance was generated this session.', '')
+    out.push('<p>No repair guidance was generated this session.</p>')
   } else {
-    lines.push(`## ${guidance.title}`)
-    lines.push(
-      guidance.manualTitle ? `Manual: ${guidance.manualTitle}` : 'Manual: not found — verify against your manual.',
+    out.push(`<h2>${esc(guidance.title)}</h2>`)
+    out.push(
+      guidance.manualTitle
+        ? `<p>Manual: ${esc(guidance.manualTitle)}</p>`
+        : '<p>Manual: not found — verify against your manual.</p>',
     )
-    lines.push('', '### Steps')
+    out.push('<h3>Steps</h3>')
     const photoByStep = new Map(
       [...(photos ?? [])].sort((a, b) => a.step - b.step).slice(0, MAX_REPORT_PHOTOS).map((p) => [p.step, p.dataUrl] as const),
     )
     guidance.steps.forEach((step, i) => {
       const mark = i < stepIndex ? '[x]' : i === stepIndex ? '[>]' : '[ ]'
-      lines.push(`${mark} Step ${i + 1}: ${step.title} — ${step.detail}`)
-      if (step.warning) lines.push(`    Warning: ${step.warning}`)
+      out.push(`<p>${esc(`${mark} Step ${i + 1}: ${step.title} — ${step.detail}`)}</p>`)
+      if (step.warning) out.push(`<p class="warning">Warning: ${esc(step.warning)}</p>`)
       const photo = photoByStep.get(i)
-      if (photo) lines.push(`![Step ${i + 1} photo](${photo})`)
+      if (photo) out.push(`<img alt="Step ${i + 1} photo" src="${esc(photo)}">`)
     })
     if (guidance.specs.length > 0) {
-      lines.push('', '### Specs (verify against the manual)')
-      for (const spec of guidance.specs) lines.push(`- ${spec.label}: ${spec.value}`)
+      out.push('<h3>Specs (verify against the manual)</h3>', '<ul>')
+      for (const spec of guidance.specs) out.push(`<li>${esc(spec.label)}: ${esc(spec.value)}</li>`)
+      out.push('</ul>')
     }
-    if (guidance.tools.length > 0) lines.push('', `Tools: ${guidance.tools.join(', ')}`)
-    lines.push('', '### Warnings')
+    if (guidance.tools.length > 0) out.push(`<p>Tools: ${esc(guidance.tools.join(', '))}</p>`)
+    out.push('<h3>Warnings</h3>', '<ul>')
     if (guidance.warnings.length > 0) {
-      for (const warning of guidance.warnings) lines.push(`- ${warning}`)
+      for (const warning of guidance.warnings) out.push(`<li>${esc(warning)}</li>`)
     } else {
-      lines.push('- No specific warnings listed — verify all work against the manual.')
+      out.push('<li>No specific warnings listed — verify all work against the manual.</li>')
     }
+    out.push('</ul>')
     if (guidance.sources.length > 0) {
-      lines.push('', '### Sources')
-      for (const source of guidance.sources) lines.push(`- [${source.title}](${source.url})`)
+      out.push('<h3>Sources</h3>', '<ul>')
+      for (const source of guidance.sources) {
+        out.push(`<li><a href="${esc(source.url)}">${esc(source.title)}</a></li>`)
+      }
+      out.push('</ul>')
     }
-    lines.push('')
   }
   if (findings && findings.length > 0) {
-    lines.push('### Findings')
-    for (const finding of findings) lines.push(`- ${finding}`)
-    lines.push('')
+    out.push('<h3>Findings</h3>', '<ul>')
+    for (const finding of findings) out.push(`<li>${esc(finding)}</li>`)
+    out.push('</ul>')
   }
-  lines.push('### Session log')
+  out.push('<h3>Session log</h3>')
   const kept = getLogs().filter((e) => e.level !== 'debug')
   if (kept.length === 0) {
-    lines.push('(empty)')
+    out.push('<p>(empty)</p>')
   } else {
+    out.push('<pre>')
     for (const e of kept) {
-      lines.push(`[${e.time}] [${e.level.toUpperCase()}] [${e.tag}] ${e.message}`)
+      out.push(esc(`[${e.time}] [${e.level.toUpperCase()}] [${e.tag}] ${e.message}`))
     }
+    out.push('</pre>')
   }
-  return lines.join('\n')
+  out.push('</body>', '</html>')
+  return out.join('\n')
 }
 
 function reportFilename(): string {
-  return `wrenchmind-report-${new Date().toISOString().replace(/[:.]/g, '-')}.md`
+  return `wrenchmind-report-${new Date().toISOString().replace(/[:.]/g, '-')}.html`
 }
 
-/** Download the report as a timestamped markdown file. */
+/** Download the report as a timestamped HTML file. */
 export function downloadReport(input: ReportInput): void {
-  const blob = new Blob([buildReport(input)], { type: 'text/markdown' })
+  const blob = new Blob([buildReport(input)], { type: 'text/html' })
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
   anchor.href = url
@@ -111,7 +149,7 @@ export async function shareReport(input: ReportInput): Promise<boolean> {
   try {
     const nav = navigator as Navigator & ShareNavigator
     if (typeof nav.canShare !== 'function' || typeof nav.share !== 'function') return false
-    const file = new File([buildReport(input)], reportFilename(), { type: 'text/markdown' })
+    const file = new File([buildReport(input)], reportFilename(), { type: 'text/html' })
     if (!nav.canShare({ files: [file] })) return false
     await nav.share({ files: [file], title: 'WrenchMind Repair Report' })
     return true

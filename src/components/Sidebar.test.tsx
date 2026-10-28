@@ -3,6 +3,7 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import Sidebar from './Sidebar'
 import { validGuidanceFixture } from '../test/guidanceFixtures'
 import type { GuidanceResult } from '../types'
+import { ifixitSearchUrl, type FixitGuide } from '../services/ifixitApi'
 
 function renderSidebar(guidance: GuidanceResult | null, overrides = {}) {
   const props = {
@@ -105,5 +106,34 @@ describe('Sidebar', () => {
       ),
     ).toBeInTheDocument()
     expect(screen.queryByRole('region', { name: 'Repair guidance' })).not.toBeInTheDocument()
+  })
+})
+
+describe('Sidebar iFixit guides passthrough', () => {
+  const guides: FixitGuide[] = [
+    {
+      title: 'iPhone 13 Battery Replacement',
+      url: 'https://www.ifixit.com/Guide/iPhone+13+Battery+Replacement/145896',
+      summary: 'iPhone batteries are rated to hold 80% of their capacity.',
+      difficulty: 'Moderate',
+      kind: 'guide',
+    },
+  ]
+
+  it('forwards guides to the hosted card', () => {
+    renderSidebar(validGuidanceFixture, { guides })
+    expect(screen.getByText('Guides via iFixit')).toBeInTheDocument()
+    const link = screen.getByRole('link', { name: 'iPhone 13 Battery Replacement' })
+    expect(link).toHaveAttribute('href', guides[0].url)
+    expect(link).toHaveAttribute('target', '_blank')
+    expect(link).toHaveAttribute('rel', 'noreferrer')
+  })
+
+  it('renders the fallback search link when guides are omitted', () => {
+    renderSidebar(validGuidanceFixture)
+    expect(screen.getByText('Guides via iFixit')).toBeInTheDocument()
+    expect(
+      screen.getByRole('link', { name: `Search iFixit for ${validGuidanceFixture.title}` }),
+    ).toHaveAttribute('href', ifixitSearchUrl(validGuidanceFixture.title))
   })
 })

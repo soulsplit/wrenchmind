@@ -17,6 +17,8 @@ function renderHeader(overrides: Partial<Parameters<typeof Header>[0]> = {}) {
     torchOn: false,
     hasTorch: false,
     onTorchToggle: vi.fn(),
+    frozen: false,
+    onFreezeToggle: vi.fn(),
     ...overrides,
   }
   render(<Header {...props} />)
@@ -147,5 +149,113 @@ describe('Header', () => {
     expect(screen.getByText('Logs')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'More options' }))
     expect(screen.queryByText('Logs')).not.toBeInTheDocument()
+  })
+
+  it('shows the freeze switch in the overflow camera cluster when live', () => {
+    renderHeader()
+    expect(screen.queryByRole('switch', { name: 'Freeze frame' })).not.toBeInTheDocument()
+    openOverflow()
+    expect(screen.getByRole('switch', { name: 'Freeze frame' })).toBeInTheDocument()
+  })
+
+  it('hides the freeze switch when the camera is off air', () => {
+    renderHeader({ live: false })
+    openOverflow()
+    expect(screen.queryByRole('switch', { name: 'Freeze frame' })).not.toBeInTheDocument()
+  })
+
+  it('keeps the freeze switch while frozen even when off air', () => {
+    renderHeader({ live: false, frozen: true })
+    openOverflow()
+    expect(screen.getByRole('switch', { name: 'Freeze frame' })).toBeChecked()
+  })
+
+  it('reports freeze toggles through the callback', () => {
+    const props = renderHeader()
+    openOverflow()
+    fireEvent.click(screen.getByRole('switch', { name: 'Freeze frame' }))
+    expect(props.onFreezeToggle).toHaveBeenCalledWith(true)
+  })
+
+  it('reflects the frozen state', () => {
+    renderHeader({ frozen: true })
+    openOverflow()
+    expect(screen.getByRole('switch', { name: 'Freeze frame' })).toBeChecked()
+  })
+
+  it('shows no FROZEN badge while live and unfrozen', () => {
+    renderHeader()
+    expect(screen.getByText('LIVE')).toBeInTheDocument()
+    expect(screen.queryByText('FROZEN')).not.toBeInTheDocument()
+  })
+
+  it('shows FROZEN instead of LIVE while frozen', () => {
+    const { rerender } = render(
+      <Header
+        status="off"
+        live
+        tracking={false}
+        voiceOn={false}
+        onVoiceToggle={vi.fn()}
+        facing="environment"
+        multiCamera
+        onSwitchCamera={vi.fn()}
+        onClearView={vi.fn()}
+        onExportReport={vi.fn()}
+        torchOn={false}
+        hasTorch={false}
+        onTorchToggle={vi.fn()}
+        frozen={false}
+        onFreezeToggle={vi.fn()}
+      />,
+    )
+    expect(screen.getByRole('status', { name: 'Camera live' })).toHaveTextContent('LIVE')
+    rerender(
+      <Header
+        status="off"
+        live
+        tracking={false}
+        voiceOn={false}
+        onVoiceToggle={vi.fn()}
+        facing="environment"
+        multiCamera
+        onSwitchCamera={vi.fn()}
+        onClearView={vi.fn()}
+        onExportReport={vi.fn()}
+        torchOn={false}
+        hasTorch={false}
+        onTorchToggle={vi.fn()}
+        frozen
+        onFreezeToggle={vi.fn()}
+      />,
+    )
+    const badge = screen.getByRole('status', { name: 'Frame frozen' })
+    expect(badge).toHaveTextContent('FROZEN')
+    expect(badge.querySelector('span')).toHaveClass('bg-amber-400')
+    expect(screen.queryByText('LIVE')).not.toBeInTheDocument()
+  })
+
+  it('shows the hint pill in the badge row only when provided', () => {
+    const props = {
+      status: 'off' as const,
+      live: true,
+      tracking: false,
+      voiceOn: false,
+      onVoiceToggle: vi.fn(),
+      facing: 'environment' as const,
+      multiCamera: true,
+      onSwitchCamera: vi.fn(),
+      onClearView: vi.fn(),
+      onExportReport: vi.fn(),
+      torchOn: false,
+      hasTorch: false,
+      onTorchToggle: vi.fn(),
+      frozen: true,
+      onFreezeToggle: vi.fn(),
+    }
+    const { rerender } = render(<Header {...props} hint="Drag to circle a part" />)
+    expect(screen.getByText('Drag to circle a part')).toBeInTheDocument()
+    rerender(<Header {...props} hint={null} />)
+    expect(screen.queryByText('Drag to circle a part')).not.toBeInTheDocument()
   })
 })

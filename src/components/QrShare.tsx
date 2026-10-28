@@ -1,22 +1,6 @@
 import { useEffect, useState } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
-
-/** Warns when the shared URL won't work on a phone, or null when it will. */
-export function getShareWarning(href: string): string | null {
-  let url: URL
-  try {
-    url = new URL(href)
-  } catch {
-    return null
-  }
-  if (['localhost', '127.0.0.1', '[::1]', '::1'].includes(url.hostname)) {
-    return 'This address only works on this device. Open the tunnel or network URL in this browser first, then scan.'
-  }
-  if (url.protocol === 'http:') {
-    return 'HTTP only: the page will open but the camera requires HTTPS — use the tunnel URL.'
-  }
-  return null
-}
+import { getShareWarning } from '../services/share'
 
 const SHARE_URL_KEY = 'wrenchmind.shareUrl'
 

@@ -3,6 +3,7 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import HudCard from './HudCard'
 import { validGuidanceFixture } from '../test/guidanceFixtures'
 import type { GuidanceResult } from '../types'
+import { ifixitSearchUrl, type FixitGuide } from '../services/ifixitApi'
 
 function renderCard(guidance: GuidanceResult | null, overrides = {}) {
   const props = {
@@ -190,5 +191,193 @@ describe('HudCard', () => {
       />,
     )
     expect(container).toBeEmptyDOMElement()
+  })
+})
+
+describe('HudCard iFixit guides', () => {
+  const guides: FixitGuide[] = [
+    {
+      title: 'iPhone 13 Battery Replacement',
+      url: 'https://www.ifixit.com/Guide/iPhone+13+Battery+Replacement/145896',
+      summary: 'iPhone batteries are rated to hold 80% of their capacity.',
+      difficulty: 'Moderate',
+      kind: 'guide',
+    },
+    {
+      title: 'After replacing battery, iPhone will not connect to WiFi',
+      url: 'https://www.ifixit.com/Answers/View/487556/After+replacing+battery',
+      summary: 'I replaced battery in my iPhone 5. Now WiFi will not connect.',
+      difficulty: null,
+      kind: 'question',
+    },
+  ]
+
+  it('renders the guides section after sources with external links and difficulty', () => {
+    renderCard(validGuidanceFixture, { guides })
+    const heading = screen.getByText('Guides via iFixit')
+    const sourceLink = screen.getByRole('link', {
+      name: 'Example Service Manual, Belt Drive chapter',
+    })
+    expect(sourceLink.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    const guideLink = screen.getByRole('link', { name: 'iPhone 13 Battery Replacement' })
+    expect(guideLink).toHaveAttribute(
+      'href',
+      'https://www.ifixit.com/Guide/iPhone+13+Battery+Replacement/145896',
+    )
+    expect(guideLink).toHaveAttribute('target', '_blank')
+    expect(guideLink).toHaveAttribute('rel', 'noreferrer')
+    expect(guideLink.parentElement?.textContent).toBe('iPhone 13 Battery Replacement · Moderate')
+    expect(screen.getByText('External links open iFixit in a new tab.')).toBeInTheDocument()
+  })
+
+  it('omits the difficulty note when the guide has none', () => {
+    renderCard(validGuidanceFixture, { guides: [guides[1]] })
+    const link = screen.getByRole('link', { name: guides[1].title })
+    expect(link.parentElement?.textContent).toBe(guides[1].title)
+  })
+
+  it('always shows the fallback search link when guidance is present', () => {
+    const expected = ifixitSearchUrl(validGuidanceFixture.title)
+    const name = `Search iFixit for ${validGuidanceFixture.title}`
+    const { unmount } = render(
+      <HudCard
+        guidance={validGuidanceFixture}
+        pending={false}
+        stepIndex={0}
+        onStepChange={() => undefined}
+        onScanAnother={() => undefined}
+        guides={guides}
+      />,
+    )
+    const withGuides = screen.getByRole('link', { name })
+    expect(withGuides).toHaveAttribute('href', expected)
+    expect(withGuides).toHaveAttribute('target', '_blank')
+    expect(withGuides).toHaveAttribute('rel', 'noreferrer')
+    unmount()
+    const second = render(
+      <HudCard
+        guidance={validGuidanceFixture}
+        pending={false}
+        stepIndex={0}
+        onStepChange={() => undefined}
+        onScanAnother={() => undefined}
+        guides={[]}
+      />,
+    )
+    expect(screen.getByRole('link', { name })).toHaveAttribute('href', expected)
+    second.unmount()
+    render(
+      <HudCard
+        guidance={validGuidanceFixture}
+        pending={false}
+        stepIndex={0}
+        onStepChange={() => undefined}
+        onScanAnother={() => undefined}
+      />,
+    )
+    expect(screen.getByRole('link', { name })).toHaveAttribute('href', expected)
+  })
+
+  it('shows the empty guides state but keeps the section and fallback link', () => {
+    renderCard(validGuidanceFixture, { guides: [] })
+    expect(screen.getByText('Guides via iFixit')).toBeInTheDocument()
+    expect(screen.getByText('No iFixit guides found for this part.')).toBeInTheDocument()
+    expect(
+      screen.getByRole('link', { name: `Search iFixit for ${validGuidanceFixture.title}` }),
+    ).toBeInTheDocument()
+  })
+
+  it('shows neither list nor empty note while guides load', () => {
+    renderCard(validGuidanceFixture, { guides: undefined })
+    expect(screen.getByText('Guides via iFixit')).toBeInTheDocument()
+    expect(screen.queryByText('No iFixit guides found for this part.')).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('link', { name: `Search iFixit for ${validGuidanceFixture.title}` }),
+    ).toBeInTheDocument()
+  })
+
+  it('renders no guides section without guidance', () => {
+    renderCard(null, { pending: true })
+    expect(screen.queryByText('Guides via iFixit')).not.toBeInTheDocument()
+  })
+
+  it('minimizes to a slim bar that keeps title, step count, and expand', () => {
+    renderCard(validGuidanceFixture)
+    fireEvent.click(screen.getByRole('button', { name: 'Minimize steps' }))
+    expect(screen.getByText('MID-DRIVE DRIVE BELT')).toBeInTheDocument()
+    expect(screen.getByText('Step 1 of 3')).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Expand steps' }),
+    ).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByText('Remove the belt cover')).not.toBeInTheDocument()
+    expect(screen.queryByText('Warnings')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Next Step' })).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Scan Another Part' }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('expands back to the full steps view', () => {
+    renderCard(validGuidanceFixture)
+    fireEvent.click(screen.getByRole('button', { name: 'Minimize steps' }))
+    expect(screen.queryByText('Remove the belt cover')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand steps' }))
+    expect(screen.getByText('Remove the belt cover')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Next Step' })).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Minimize steps' }),
+    ).toHaveAttribute('aria-expanded', 'true')
+  })
+
+  it('keeps minimized state across step changes', () => {
+    const { rerender } = render(
+      <HudCard
+        guidance={validGuidanceFixture}
+        pending={false}
+        stepIndex={0}
+        onStepChange={() => undefined}
+        onScanAnother={() => undefined}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Minimize steps' }))
+    rerender(
+      <HudCard
+        guidance={validGuidanceFixture}
+        pending={false}
+        stepIndex={1}
+        onStepChange={() => undefined}
+        onScanAnother={() => undefined}
+      />,
+    )
+    expect(screen.getByRole('button', { name: 'Expand steps' })).toBeInTheDocument()
+    expect(screen.getByText('Step 2 of 3')).toBeInTheDocument()
+    expect(screen.queryByText('Release belt tension')).not.toBeInTheDocument()
+  })
+
+  it('re-opens the card when a fresh scan replaces the guidance', () => {
+    const fresh: GuidanceResult = { ...validGuidanceFixture, title: 'ALTERNATOR BELT' }
+    const { rerender } = render(
+      <HudCard
+        guidance={validGuidanceFixture}
+        pending={false}
+        stepIndex={0}
+        onStepChange={() => undefined}
+        onScanAnother={() => undefined}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Minimize steps' }))
+    expect(screen.getByRole('button', { name: 'Expand steps' })).toBeInTheDocument()
+    rerender(
+      <HudCard
+        guidance={fresh}
+        pending={false}
+        stepIndex={0}
+        onStepChange={() => undefined}
+        onScanAnother={() => undefined}
+      />,
+    )
+    expect(screen.getByText('ALTERNATOR BELT')).toBeInTheDocument()
+    expect(screen.getByText('Remove the belt cover')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Minimize steps' })).toBeInTheDocument()
   })
 })

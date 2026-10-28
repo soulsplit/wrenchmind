@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { Callout, GuidanceResult, MaskRecord, OverlayKind, Status } from '../types'
+import type {
+  Callout,
+  GuidanceResult,
+  MaskBox,
+  MaskRecord,
+  OverlayKind,
+  Status,
+} from '../types'
 import {
   captureFrameBurst,
   captureThumbnail,
@@ -10,9 +17,21 @@ import {
   segmentImage,
 } from '../services/metaApi'
 import type { SamPointPrompt } from '../services/metaApi'
+import {
+  clampZoomPan,
+  identifyWithContext,
+  NO_ZOOM,
+  pinchZoom,
+  stageBoxToMedia,
+  tapToMedia,
+  zoomAt,
+  ZOOM_MIN,
+  type ZoomState,
+} from '../services/feedStage'
 import { parseSamStream } from '../services/samParser'
 import { cancelSpeech, speakText } from '../services/speechOutput'
 import { fetchGuidance } from '../services/guidanceApi'
+import { buildQuery, searchGuides, type FixitGuide } from '../services/ifixitApi'
 import { downloadReport, shareReport } from '../services/report'
 import { VoiceAssistant } from '../services/voiceAssistant'
 import { permissionBlocker, secureContextBlocker } from '../services/mediaSupport'
@@ -20,7 +39,8 @@ import { logDebug, logError, logInfo, logWarn } from '../services/logger'
 import QueryBar from './QueryBar'
 import Header from './Header'
 import HudCard from './HudCard'
-import Sidebar, { useDesktopLayout } from './Sidebar'
+import Sidebar from './Sidebar'
+import { useDesktopLayout } from '../hooks/useDesktopLayout'
 import { useKeyboardShift } from '../hooks/useKeyboardShift'
 
 interface Overlay {
@@ -121,6 +141,39 @@ function isLabelQuery(phrase: string): boolean {
   )
 }
 
+/** Hold time promoting a frozen-frame tap to an outline-removing long-press. */
+const LONG_PRESS_MS = 500
+/** Finger drift cancelling a long-press. */
+const LONG_PRESS_SLOP_PX = 10
+/** Min trace bbox span (untransformed px) that counts as a circle query. */
+const TRACE_MIN_SPAN = 24
+/** Min move between recorded trace points; bounds array growth. */
+const TRACE_POINT_GAP = 2
+/** Cap on recorded trace points per stroke. */
+const TRACE_MAX_POINTS = 1000
+/** Fraction of the frame's short side used for the tap fallback crop. */
+const FALLBACK_CROP_FRACTION = 0.25
+
+/** Largest mask by box area; null when SAM returns none. */
+function largestMask(recs: MaskRecord[]): MaskRecord | null {
+  if (recs.length === 0) return null
+  return recs.reduce((a, b) =>
+    (b.box.x2 - b.box.x1 + 1) * (b.box.y2 - b.box.y1 + 1) >
+    (a.box.x2 - a.box.x1 + 1) * (a.box.y2 - a.box.y1 + 1)
+      ? b
+      : a,
+  )
+}
+
+/** Tap-centered box for identification when SAM returns no masks. */
+function fallbackBox(point: SamPointPrompt, vw: number, vh: number): MaskBox {
+  const size = Math.max(1, Math.floor(Math.min(vw, vh) * FALLBACK_CROP_FRACTION))
+  const half = Math.floor(size / 2)
+  const x1 = Math.min(vw - size, Math.max(0, point.x - half))
+  const y1 = Math.min(vh - size, Math.max(0, point.y - half))
+  return { x1, y1, x2: x1 + size - 1, y2: y1 + size - 1, w: size, h: size }
+}
+
 /** Convert 0-100 viewport coords to media pixels; undefined when dims are unknown. */
 function toPixelPoint(
   ax: number,
@@ -140,6 +193,8 @@ function toPixelPoint(
 export default function Scanner() {
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const tapRef = useRef<HTMLDivElement>(null)
+  const stageRef = useRef<HTMLDivElement>(null)
   const [status, setStatus] = useState<Status>('off')
   const [error, setError] = useState<string>('')
   const [voiceOn, setVoiceOn] = useState(false)
@@ -150,6 +205,22 @@ export default function Scanner() {
   voiceOnRef.current = voiceOn
   const busyRef = useRef(false)
   const pendingRef = useRef<string | null>(null)
+  const pressRef = useRef<{ x: number; y: number; timer: number } | null>(null)
+  const suppressTapRef = useRef(false)
+  const pointersRef = useRef(new Map<number, { x: number; y: number; sx: number; sy: number }>())
+  const pinchRef = useRef<{ dist: number; midX: number; midY: number } | null>(null)
+  /**
+   * Circle-trace stroke in untransformed stage coords; null when idle. The
+   * ref leads so pointerup always sees the full path: move updates batch
+   * (continuous events), but the release decision must not wait for a
+   * render. Both are always assigned together via storeTrace.
+   */
+  const traceRef = useRef<{ x: number; y: number }[] | null>(null)
+  const [trace, setTrace] = useState<{ x: number; y: number }[] | null>(null)
+  const storeTrace = (next: { x: number; y: number }[] | null) => {
+    traceRef.current = next
+    setTrace(next)
+  }
   // Tracking lock: once an item is identified, follow-up phrases answer by
   // voice without re-marking. Ref is the source of truth for handlePhrase
   // (keeps its identity stable for the voice lifecycle effect); state mirrors
@@ -163,6 +234,10 @@ export default function Scanner() {
   const [torchOn, setTorchOn] = useState(false)
   const [hasTorch, setHasTorch] = useState(false)
   const [cameraLive, setCameraLive] = useState(false)
+  const [frozen, setFrozen] = useState(false)
+  const [zoom, setZoom] = useState<ZoomState>(NO_ZOOM)
+  const zoomRef = useRef(zoom)
+  zoomRef.current = zoom
   const [actualFacing, setActualFacing] = useState<'environment' | 'user' | 'unknown'>('unknown')
   const [findings, setFindings] = useState<string[]>([])
   /** Photo checkpoint per completed step index; pinned on advance, cleared per job. */
@@ -181,6 +256,9 @@ export default function Scanner() {
     () => typeof navigator !== 'undefined' && !navigator.onLine,
   )
   const guidanceReqRef = useRef(0)
+  /** iFixit hits for the current part; undefined while loading. */
+  const [guides, setGuides] = useState<FixitGuide[]>()
+  const guidesReqRef = useRef(0)
   // Desktop layout branch (lg+): the feed narrows to 2/3 and the sidebar
   // hosts the guidance card; the bottom-docked card unmounts to avoid
   // duplicating it.
@@ -276,9 +354,12 @@ export default function Scanner() {
         return
       }
       const other = facing === 'environment' ? 'user' : 'environment'
+      // ideal resolution never fails: capable cameras give up to 4K for the
+      // zoomable feed, weaker ones simply negotiate what they support.
+      const hiRes = { width: { ideal: 3840 }, height: { ideal: 2160 } }
       const attempts: { label: string; constraints: MediaStreamConstraints }[] = [
-        { label: facing, constraints: { video: { facingMode: facing } } },
-        { label: other, constraints: { video: { facingMode: other } } },
+        { label: facing, constraints: { video: { facingMode: facing, ...hiRes } } },
+        { label: other, constraints: { video: { facingMode: other, ...hiRes } } },
         { label: 'any', constraints: { video: true } },
       ]
       for (const { label, constraints } of attempts) {
@@ -305,8 +386,12 @@ export default function Scanner() {
         // Ground truth for the badge: the requested facing may have fallen
         // back (desktop webcams report no facingMode at all).
         const track = stream.getVideoTracks()[0]
-        const mode = track?.getSettings?.().facingMode
+        const settings = track?.getSettings?.()
+        const mode = settings?.facingMode
         setActualFacing(mode === 'environment' || mode === 'user' ? mode : 'unknown')
+        if (settings?.width && settings?.height) {
+          logInfo('camera', `negotiated ${settings.width}x${settings.height}`)
+        }
         // Torch is per-track: recompute on every (re)connect and start dark.
         const caps = track?.getCapabilities?.() as TorchCapabilities | undefined
         setHasTorch(caps?.torch === true)
@@ -332,6 +417,7 @@ export default function Scanner() {
     return () => {
       cancelled = true
       setCameraLive(false)
+      setFrozen(false)
       setActualFacing('unknown')
       setTorchOn(false)
       setHasTorch(false)
@@ -410,11 +496,64 @@ export default function Scanner() {
     [tickRefresh],
   )
 
+  /** Pause re-segmentation ticks without dropping the tracked target. */
+  const pauseRefresh = useCallback(() => {
+    if (refreshRef.current !== null) {
+      window.clearTimeout(refreshRef.current)
+      refreshRef.current = null
+    }
+  }, [])
+
+  /**
+   * Freeze-frame workbench switch. Freezing pauses only the refresh
+   * timeout (masks stay painted) and stills the video; resuming replays
+   * the video and re-arms ticks when a target is tracked.
+   */
+  const setFrozenMode = useCallback(
+    (next: boolean) => {
+      const video = videoRef.current
+      if (next) {
+        pauseRefresh()
+        video?.pause()
+        setFrozen(true)
+        logInfo('camera', 'frame frozen — circle or tap a part')
+        return
+      }
+      traceRef.current = null
+      setTrace(null)
+      setFrozen(false)
+      if (video) {
+        void (async () => {
+          try {
+            await video.play()
+          } catch {
+            logWarn('camera', 'video autoplay was blocked')
+          }
+        })()
+      }
+      if (targetRef.current && refreshRef.current === null) {
+        refreshRef.current = window.setTimeout(() => void tickRefresh(), REFRESH_INTERVAL_MS)
+      }
+      logInfo('camera', 'frame live')
+    },
+    [pauseRefresh, tickRefresh],
+  )
+
   /**
    * Fetch repair guidance alongside segmentation. Fire-and-forget on purpose:
    * guidance must never stall or fail the AR phrase pipeline, and the request
    * id drops stale responses when a newer scan supersedes them.
    */
+  /**
+   * Voice output only happens in voice mode; otherwise the reply stays
+   * visual and the status never claims to speak.
+   */
+  const speakReply = useCallback(async (text: string): Promise<void> => {
+    if (!voiceOnRef.current) return
+    setStatus('speaking')
+    await speakText(text)
+  }, [])
+
   const requestGuidance = useCallback((label: string, phrase: string, context: string) => {
     guidanceReqRef.current += 1
     const reqId = guidanceReqRef.current
@@ -434,6 +573,30 @@ export default function Scanner() {
     ).finally(() => {
       if (guidanceReqRef.current === reqId) setGuidancePending(false)
     })
+  }, [])
+
+  /**
+   * Fetch iFixit guides alongside guidance. Fire-and-forget like guidance:
+   * lookup must never stall the AR pipeline, and failures settle to the
+   * empty list so the card shows its fallback search link.
+   */
+  const requestGuides = useCallback((label: string, phrase: string) => {
+    guidesReqRef.current += 1
+    const reqId = guidesReqRef.current
+    setGuides(undefined)
+    const query = buildQuery(phrase, label)
+    void searchGuides(query, 3).then(
+      (result) => {
+        if (guidesReqRef.current !== reqId) return
+        setGuides(result)
+        logInfo('ifixit', `"${query}" (${result.length} guides)`)
+      },
+      (e: unknown) => {
+        if (guidesReqRef.current !== reqId) return
+        setGuides([])
+        logWarn('ifixit', `guides unavailable: ${e instanceof Error ? e.message : String(e)}`)
+      },
+    )
   }, [])
 
   const handlePhrase = useCallback(async (phrase: string) => {
@@ -481,8 +644,7 @@ export default function Scanner() {
           ? 'Procedure complete.'
           : `Step ${next + 1} of ${count}: ${step.title}. ${step.detail}${step.warning ? ` Warning: ${step.warning}` : ''}`
         logInfo('step', `"${phrase}" → step ${next + 1}/${count}`)
-        setStatus('speaking')
-        await speakText(line)
+        await speakReply(line)
         setStatus(voiceOnRef.current ? 'listening' : 'off')
         return
       }
@@ -498,13 +660,11 @@ export default function Scanner() {
           const found = await extractLabelText(frame)
           if (found.length === 0) {
             logInfo('label', 'no legible markings')
-            setStatus('speaking')
-            await speakText('I could not read any markings. Try moving closer.')
+            await speakReply('I could not read any markings. Try moving closer.')
           } else {
             setFindings(found)
             logInfo('label', `${found.length} markings: ${found.slice(0, 3).join('; ')}`)
-            setStatus('speaking')
-            await speakText(`Label reads: ${found.join('. ')}`)
+            await speakReply(`Label reads: ${found.join('. ')}`)
           }
           setStatus(voiceOnRef.current ? 'listening' : 'off')
         } catch (e) {
@@ -581,6 +741,7 @@ export default function Scanner() {
           draw()
           armRefresh(result.target_label, targetPts)
           requestGuidance(result.target_label, phrase, ctxStr)
+          requestGuides(result.target_label, phrase)
           trackingRef.current = true
           setTracking(true)
         } else if (trackingRef.current) {
@@ -589,8 +750,7 @@ export default function Scanner() {
         // Speak only in speech_and_visual mode with a non-null response.
         // visual_only and null responses stay silent (visual-only).
         if (result.display_mode === 'speech_and_visual' && result.speech_response) {
-          setStatus('speaking')
-          await speakText(result.speech_response)
+          await speakReply(result.speech_response)
         }
         setStatus(voiceOnRef.current ? 'listening' : 'off')
       } catch (e) {
@@ -604,7 +764,233 @@ export default function Scanner() {
       pendingRef.current = null
       if (next) void handlePhrase(next)
     }
-  }, [draw, armRefresh, requestGuidance])
+  }, [draw, armRefresh, requestGuidance, requestGuides, speakReply])
+
+  /**
+   * Shared tap/circle outline tail: numbered badge, overlay, memory,
+   * callout, and log line. Stable (refs + setState + draw only) for the
+   * query callbacks.
+   */
+  const presentOutline = useCallback(
+    (args: {
+      display: string
+      kind: OverlayKind
+      rec: MaskRecord
+      x: number
+      y: number
+      phrase: string
+      channel: string
+    }) => {
+      // Max-plus-one keeps badges unique across long-press removals.
+      const badge = String(
+        overlaysRef.current.reduce(
+          (m, o) => Math.max(m, Number.parseInt(o.label ?? '', 10) || 0),
+          0,
+        ) + 1,
+      )
+      overlaysRef.current = [...overlaysRef.current, { rec: args.rec, kind: args.kind, label: badge }]
+      assistantRef.current?.pushMemory({
+        phrase: args.phrase,
+        label: args.display,
+        x: args.x,
+        y: args.y,
+      })
+      setCallout({ label: args.display, x: args.x, y: args.y, kind: args.kind })
+      draw()
+      logInfo(args.channel, `"${args.display}" outlined (#${badge})`)
+    },
+    [draw],
+  )
+
+  /**
+   * Frozen-frame tap-to-outline: segment at the tap point, crop the largest
+   * mask (tap-centered fallback when SAM returns none), identify the part,
+   * then outline it with a numbered badge, callout, speech, and memory.
+   * Ignored while live, busy, or keyless; holds busyRef for the whole flow.
+   */
+  const handleTap = useCallback(
+    async (clientX: number, clientY: number) => {
+      if (!frozen || busyRef.current) return
+      const video = videoRef.current
+      const layer = tapRef.current
+      if (!video || !layer) return
+      if (!hasApiKey()) {
+        setError('API key missing: set VITE_META_MODEL_API_KEY in .env')
+        return
+      }
+      busyRef.current = true
+      try {
+        setStatus('analyzing')
+        setEmptyTarget(false)
+        const tap = tapToMedia(
+          clientX,
+          clientY,
+          layer.getBoundingClientRect(),
+          video.videoWidth,
+          video.videoHeight,
+          zoomRef.current.scale,
+        )
+        if (!tap) throw new Error('No video frame')
+        const img = captureVideoFrame(video)
+        if (!img) throw new Error('No video frame')
+        logInfo('tap', `tap @ (${tap.x.toFixed(1)},${tap.y.toFixed(1)})`)
+        const recs = await parseSamStream(segmentImage(img, 'tapped part', tap.point))
+        const largest = largestMask(recs)
+        const targetBox = largest
+          ? largest.box
+          : fallbackBox(tap.point, video.videoWidth, video.videoHeight)
+        const name = await identifyWithContext(video, targetBox)
+        if (!name) logWarn('tap', 'identify inconclusive after tight + wide crops')
+        const kind = name ? classifyTarget(name) : 'component'
+        const display = name || 'Unknown part'
+        const rec: MaskRecord = largest ?? {
+          frame: 0,
+          ordinal: 0,
+          objectId: `tap-${overlaysRef.current.length + 1}`,
+          box: targetBox,
+          raster: new Uint8Array(0),
+        }
+        presentOutline({
+          display,
+          kind,
+          rec,
+          x: tap.x,
+          y: tap.y,
+          phrase: 'tap to outline',
+          channel: 'tap',
+        })
+        await speakReply(name || 'I could not identify this part.')
+        setStatus(voiceOnRef.current ? 'listening' : 'off')
+      } catch (e) {
+        logError('tap', e instanceof Error ? e.message : String(e))
+        setStatus('error')
+        window.setTimeout(() => setStatus(voiceOnRef.current ? 'listening' : 'off'), 2000)
+      } finally {
+        busyRef.current = false
+      }
+    },
+    [frozen, speakReply, presentOutline],
+  )
+
+  /**
+   * Circle-to-identify: segment inside the traced region (box prompt plus
+   * its center point), identify with the context ladder, then outline.
+   * Falls back to the user's own box when SAM returns no masks — the user
+   * already framed the part. Ignored while live, busy, or keyless.
+   */
+  const handleCircle = useCallback(
+    async (ax: number, ay: number, bx: number, by: number) => {
+      if (!frozen || busyRef.current) return
+      const video = videoRef.current
+      const stage = stageRef.current
+      if (!video || !stage) return
+      if (!hasApiKey()) {
+        setError('API key missing: set VITE_META_MODEL_API_KEY in .env')
+        return
+      }
+      busyRef.current = true
+      try {
+        setStatus('analyzing')
+        setEmptyTarget(false)
+        const region = stageBoxToMedia(
+          ax,
+          ay,
+          bx,
+          by,
+          stage.clientWidth,
+          stage.clientHeight,
+          video.videoWidth,
+          video.videoHeight,
+        )
+        if (!region) throw new Error('No video frame')
+        const img = captureVideoFrame(video)
+        if (!img) throw new Error('No video frame')
+        logInfo('circle', `region @ (${region.x.toFixed(1)},${region.y.toFixed(1)})`)
+        const recs = await parseSamStream(
+          segmentImage(img, 'circled part', undefined, {
+            ...region.box,
+            width: video.videoWidth,
+            height: video.videoHeight,
+          }),
+        )
+        const largest = largestMask(recs)
+        const targetBox = largest ? largest.box : region.box
+        const name = await identifyWithContext(video, targetBox)
+        if (!name) logWarn('circle', 'identify inconclusive after tight + wide crops')
+        const kind = name ? classifyTarget(name) : 'component'
+        const display = name || 'Unknown part'
+        const rec: MaskRecord = largest ?? {
+          frame: 0,
+          ordinal: 0,
+          objectId: `circle-${overlaysRef.current.length + 1}`,
+          box: {
+            ...targetBox,
+            w: targetBox.x2 - targetBox.x1 + 1,
+            h: targetBox.y2 - targetBox.y1 + 1,
+          },
+          raster: new Uint8Array(0),
+        }
+        presentOutline({
+          display,
+          kind,
+          rec,
+          x: region.x,
+          y: region.y,
+          phrase: 'circle to identify',
+          channel: 'circle',
+        })
+        await speakReply(name || 'I could not identify this part.')
+        setStatus(voiceOnRef.current ? 'listening' : 'off')
+      } catch (e) {
+        logError('circle', e instanceof Error ? e.message : String(e))
+        setStatus('error')
+        window.setTimeout(() => setStatus(voiceOnRef.current ? 'listening' : 'off'), 2000)
+      } finally {
+        busyRef.current = false
+      }
+    },
+    [frozen, speakReply, presentOutline],
+  )
+
+  /** Long-press removal: drop the topmost outline containing the tap point. */
+  const removeOutlineAt = useCallback(
+    (clientX: number, clientY: number) => {
+      const video = videoRef.current
+      const layer = tapRef.current
+      if (!video || !layer) return
+      const tap = tapToMedia(
+        clientX,
+        clientY,
+        layer.getBoundingClientRect(),
+        video.videoWidth,
+        video.videoHeight,
+        zoomRef.current.scale,
+      )
+      if (!tap) return
+      const { x: mx, y: my } = tap.point
+      let hit = -1
+      for (let i = overlaysRef.current.length - 1; i >= 0; i--) {
+        const { box } = overlaysRef.current[i].rec
+        if (mx >= box.x1 && mx <= box.x2 && my >= box.y1 && my <= box.y2) {
+          hit = i
+          break
+        }
+      }
+      if (hit < 0) return
+      overlaysRef.current = overlaysRef.current.filter((_, i) => i !== hit)
+      if (overlaysRef.current.length === 0) setCallout(null)
+      draw()
+      logInfo('tap', 'outline removed (long-press)')
+    },
+    [draw],
+  )
+
+  const cancelPress = useCallback(() => {
+    if (pressRef.current) {
+      window.clearTimeout(pressRef.current.timer)
+      pressRef.current = null
+    }
+  }, [])
 
   // Voice assistant lifecycle.
   useEffect(() => {
@@ -657,6 +1043,8 @@ export default function Scanner() {
     setGuidance(null)
     setGuidancePending(false)
     setStepIndex(0)
+    guidesReqRef.current += 1
+    setGuides(undefined)
     draw(true)
   }
 
@@ -693,10 +1081,37 @@ export default function Scanner() {
     })()
   }
 
+  /**
+   * Client point → viewport coords (screen px relative to the stage
+   * origin). Zoom focal points live in this space; null without a stage.
+   */
+  const toViewportPoint = (clientX: number, clientY: number): { x: number; y: number } | null => {
+    const stage = stageRef.current
+    if (!stage) return null
+    const rect = stage.getBoundingClientRect()
+    const z = zoomRef.current
+    return { x: clientX - (rect.left - z.x), y: clientY - (rect.top - z.y) }
+  }
+
+  /**
+   * Client point → untransformed stage coords for trace/circle mapping.
+   * Relative to the transformed box, like tapToMedia: pan cancels out.
+   */
+  const toStagePoint = (clientX: number, clientY: number): { x: number; y: number } | null => {
+    const stage = stageRef.current
+    if (!stage) return null
+    const rect = stage.getBoundingClientRect()
+    const s = zoomRef.current.scale
+    return { x: (clientX - rect.left) / s, y: (clientY - rect.top) / s }
+  }
+
   const flipCamera = () => {
+    // Resume the feed before switching; the effect cleanup drops frozen too.
+    if (frozen) setFrozenMode(false)
     // The overlay belongs to the old scene: clear it before switching.
     resetOverlays()
     logInfo('camera', 'switching camera')
+    setZoom(NO_ZOOM)
     setFacing((was) => (was === 'environment' ? 'user' : 'environment'))
   }
 
@@ -719,6 +1134,147 @@ export default function Scanner() {
     <div className="relative w-full h-dvh overflow-hidden bg-black lg:flex">
       {/* Feed pane: overlay master at every size; narrows to 2/3 on desktop. */}
       <div className="relative h-full w-full lg:w-auto lg:min-w-0 lg:flex-1">
+      {/*
+        Zoom stage: video, canvas, tap layer, and callout scale/pan as one
+        so masks and pills stay aligned at every zoom. Origin 0 0 keeps the
+        tapToMedia inverse trivial (see tapToMedia). touch-none routes pinch
+        gestures to pointer events instead of the browser zoom.
+      */}
+      <div
+        ref={stageRef}
+        data-testid="zoom-stage"
+        className="absolute inset-0 touch-none"
+        style={{
+          transform: `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})`,
+          transformOrigin: '0 0',
+        }}
+        onPointerDown={(e) => {
+          pointersRef.current.set(e.pointerId, {
+            x: e.clientX,
+            y: e.clientY,
+            sx: e.clientX,
+            sy: e.clientY,
+          })
+          if (pointersRef.current.size === 2) {
+            const [a, b] = [...pointersRef.current.values()]
+            pinchRef.current = {
+              dist: Math.hypot(a.x - b.x, a.y - b.y),
+              midX: (a.x + b.x) / 2,
+              midY: (a.y + b.y) / 2,
+            }
+            // A second finger cancels the circle stroke: pinch takes over.
+            storeTrace(null)
+            cancelPress()
+            return
+          }
+          if (frozen && pointersRef.current.size === 1) {
+            const pt = toStagePoint(e.clientX, e.clientY)
+            storeTrace(pt ? [pt] : null)
+          }
+        }}
+        onPointerMove={(e) => {
+          const pts = pointersRef.current
+          const p = pts.get(e.pointerId)
+          if (!p) return
+          const dx = e.clientX - p.x
+          const dy = e.clientY - p.y
+          p.x = e.clientX
+          p.y = e.clientY
+          const stage = stageRef.current
+          if (!stage) return
+          const z = zoomRef.current
+          const vw = stage.clientWidth
+          const vh = stage.clientHeight
+          if (pts.size >= 2) {
+            const [a, b] = [...pts.values()]
+            const dist = Math.hypot(a.x - b.x, a.y - b.y)
+            const midX = (a.x + b.x) / 2
+            const midY = (a.y + b.y) / 2
+            const pinch = pinchRef.current
+            const mid = toViewportPoint(midX, midY)
+            const prevMid = pinch ? toViewportPoint(pinch.midX, pinch.midY) : null
+            if (pinch && pinch.dist > 0 && dist > 0 && mid && prevMid) {
+              setZoom(
+                pinchZoom(z, dist / pinch.dist, prevMid.x, prevMid.y, mid.x, mid.y, vw, vh),
+              )
+            }
+            pinchRef.current = { dist, midX, midY }
+            return
+          }
+          // Frozen single-finger drags trace a circle; live drags pan.
+          if (frozen) {
+            const pt = toStagePoint(e.clientX, e.clientY)
+            if (pt) {
+              const base = traceRef.current ?? []
+              const last = base[base.length - 1]
+              const near =
+                last !== undefined &&
+                Math.hypot(pt.x - last.x, pt.y - last.y) < TRACE_POINT_GAP
+              if (!near && base.length < TRACE_MAX_POINTS) {
+                storeTrace([...base, pt])
+              }
+            }
+            return
+          }
+          if (z.scale <= ZOOM_MIN) return
+          setZoom(clampZoomPan(z.scale, z.x + dx, z.y + dy, vw, vh))
+          if (Math.hypot(e.clientX - p.sx, e.clientY - p.sy) > LONG_PRESS_SLOP_PX) {
+            suppressTapRef.current = true
+            cancelPress()
+          }
+        }}
+        onPointerUp={(e) => {
+          pointersRef.current.delete(e.pointerId)
+          if (pointersRef.current.size < 2) {
+            // A pinch never becomes a tap, even a perfectly still one.
+            if (pinchRef.current) suppressTapRef.current = true
+            pinchRef.current = null
+          }
+          const done = traceRef.current
+          storeTrace(null)
+          if (frozen && done && done.length > 0) {
+            const xs = done.map((pt) => pt.x)
+            const ys = done.map((pt) => pt.y)
+            const ax = Math.min(...xs)
+            const ay = Math.min(...ys)
+            const bx = Math.max(...xs)
+            const by = Math.max(...ys)
+            const span = Math.max(bx - ax, by - ay)
+            if (span >= TRACE_MIN_SPAN) {
+              suppressTapRef.current = true
+              cancelPress()
+              void handleCircle(ax, ay, bx, by)
+            } else if (span > LONG_PRESS_SLOP_PX) {
+              // A drag too small to circle: no query, and no tap either.
+              suppressTapRef.current = true
+              cancelPress()
+            }
+          }
+        }}
+        onPointerCancel={(e) => {
+          pointersRef.current.delete(e.pointerId)
+          if (pointersRef.current.size < 2) pinchRef.current = null
+          storeTrace(null)
+        }}
+        onWheel={(e) => {
+          // Plain wheel zooms at the cursor; ctrl/meta-wheel stays the
+          // browser's page zoom (preventDefault is unreliable on wheel).
+          if (e.ctrlKey || e.metaKey) return
+          const stage = stageRef.current
+          const focal = toViewportPoint(e.clientX, e.clientY)
+          if (!stage || !focal) return
+          setZoom(
+            zoomAt(
+              zoomRef.current,
+              e.deltaY < 0 ? 1.2 : 1 / 1.2,
+              focal.x,
+              focal.y,
+              stage.clientWidth,
+              stage.clientHeight,
+            ),
+          )
+        }}
+      >
       <video
         ref={videoRef}
         autoPlay
@@ -736,6 +1292,61 @@ export default function Scanner() {
         aria-hidden="true"
         className="absolute inset-0 w-full h-full object-cover pointer-events-none"
       />
+      {/*
+        Frozen-frame tap layer: above the canvas, below the header (z-20)
+        and bottom dock (z-10). Short taps outline a part; drags trace a
+        circle to identify the enclosed region; a 500ms hold with minimal
+        drift removes the outline under the finger.
+      */}
+      {frozen && (
+        <div
+          ref={tapRef}
+          aria-label="Frozen frame: circle or tap to identify a part"
+          onClick={(e) => {
+            if (suppressTapRef.current) {
+              suppressTapRef.current = false
+              return
+            }
+            void handleTap(e.clientX, e.clientY)
+          }}
+          onPointerDown={(e) => {
+            cancelPress()
+            const { clientX, clientY } = e
+            const timer = window.setTimeout(() => {
+              pressRef.current = null
+              suppressTapRef.current = true
+              removeOutlineAt(clientX, clientY)
+            }, LONG_PRESS_MS)
+            pressRef.current = { x: clientX, y: clientY, timer }
+          }}
+          onPointerMove={(e) => {
+            const press = pressRef.current
+            if (!press) return
+            if (Math.hypot(e.clientX - press.x, e.clientY - press.y) > LONG_PRESS_SLOP_PX) {
+              cancelPress()
+            }
+          }}
+          onPointerUp={cancelPress}
+          onPointerCancel={cancelPress}
+          className="absolute inset-0 z-[5] cursor-crosshair bg-transparent touch-none"
+        />
+      )}
+      {trace && trace.length > 1 && (
+        <svg
+          aria-hidden="true"
+          data-testid="trace-trail"
+          className="absolute inset-0 w-full h-full pointer-events-none"
+        >
+          <polyline
+            points={trace.map((pt) => `${pt.x.toFixed(1)},${pt.y.toFixed(1)}`).join(' ')}
+            fill="none"
+            stroke="#22d3ee"
+            strokeWidth={3}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      )}
       {callout && (
         <div
           role="status"
@@ -753,6 +1364,7 @@ export default function Scanner() {
           {callout.label}
         </div>
       )}
+      </div>
       <Header
         status={status}
         live={cameraLive}
@@ -767,6 +1379,9 @@ export default function Scanner() {
         torchOn={torchOn}
         hasTorch={hasTorch}
         onTorchToggle={(next) => void toggleTorch(next)}
+        frozen={frozen}
+        onFreezeToggle={(next) => setFrozenMode(next)}
+        hint={frozen ? 'Drag to circle a part · tap to identify' : null}
       />
       {/*
         Bottom dock: error toast, HUD card, and thumb-reachable query input
@@ -849,7 +1464,7 @@ export default function Scanner() {
           <div
             role="status"
             aria-label="Analyzing"
-            className="pointer-events-none self-start inline-flex items-center gap-2 rounded-full bg-black/70 px-3 py-1.5 text-xs font-semibold text-white"
+            className="pointer-events-none self-center inline-flex items-center gap-2 rounded-full bg-black/70 px-3 py-1.5 text-xs font-semibold text-white"
           >
             <span className="motion-safe:animate-pulse inline-block h-2 w-2 rounded-full bg-cyan-300" />
             Analyzing…
@@ -878,6 +1493,7 @@ export default function Scanner() {
             stepIndex={stepIndex}
             onStepChange={changeStep}
             onScanAnother={clearOverlay}
+            guides={guides}
           />
         )}
         <QueryBar onSubmit={(text) => void handlePhrase(text)} />
@@ -887,6 +1503,7 @@ export default function Scanner() {
         <Sidebar
           guidance={guidance}
           pending={guidancePending}
+          guides={guides}
           stepIndex={stepIndex}
           onStepChange={changeStep}
           onScanAnother={clearOverlay}

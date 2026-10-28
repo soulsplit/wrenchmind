@@ -1,4 +1,6 @@
+import { useEffect, useState } from 'react'
 import type { GuidanceResult } from '../types'
+import { ifixitSearchUrl, type FixitGuide } from '../services/ifixitApi'
 
 interface HudCardProps {
   guidance: GuidanceResult | null
@@ -6,6 +8,8 @@ interface HudCardProps {
   stepIndex: number
   onStepChange: (index: number) => void
   onScanAnother: () => void
+  /** iFixit guide hits; undefined while loading, empty when none found. */
+  guides?: FixitGuide[]
 }
 
 const SHELL = 'w-full rounded-2xl bg-black/80 backdrop-blur-md p-4 flex flex-col gap-3'
@@ -39,7 +43,14 @@ export default function HudCard({
   stepIndex,
   onStepChange,
   onScanAnother,
+  guides,
 }: HudCardProps) {
+  const [minimized, setMinimized] = useState(false)
+  // A fresh scan always re-opens the card; step changes keep its state.
+  useEffect(() => {
+    setMinimized(false)
+  }, [guidance])
+
   if (!guidance) {
     if (!pending) return null
     return <SkeletonCard />
@@ -49,10 +60,49 @@ export default function HudCard({
   const safeIndex = steps.length > 0 ? Math.min(Math.max(0, stepIndex), steps.length - 1) : 0
   const step = steps[safeIndex]
 
+  if (minimized) {
+    return (
+      <section aria-label="Repair guidance" className="w-full rounded-2xl bg-black/80 backdrop-blur-md px-4 py-2">
+        <div className="flex items-center gap-2">
+          <div className="min-w-0 flex-1 truncate text-base font-bold text-white">
+            {guidance.title}
+          </div>
+          {step && (
+            <div className="shrink-0 text-sm font-semibold text-white/70">
+              Step {safeIndex + 1} of {steps.length}
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={() => setMinimized(false)}
+            aria-expanded={false}
+            aria-label="Expand steps"
+            className="min-h-[48px] shrink-0 rounded-lg bg-white/15 px-4 text-white font-bold text-base active:scale-95 transition"
+          >
+            Expand
+          </button>
+        </div>
+      </section>
+    )
+  }
+
   return (
     <section aria-label="Repair guidance" className={`${SHELL} max-h-[44dvh]`}>
       <div className="min-h-0 overflow-y-auto flex flex-col gap-3">
-        <h2 className="text-xl font-bold tracking-tight text-white">{guidance.title}</h2>
+        <div className="flex items-start gap-2">
+          <h2 className="min-w-0 flex-1 text-xl font-bold tracking-tight text-white">
+            {guidance.title}
+          </h2>
+          <button
+            type="button"
+            onClick={() => setMinimized(true)}
+            aria-expanded={true}
+            aria-label="Minimize steps"
+            className="min-h-[48px] shrink-0 rounded-lg bg-white/15 px-4 text-white font-bold text-base active:scale-95 transition"
+          >
+            Minimize
+          </button>
+        </div>
 
         {step ? (
           <div className="rounded-xl bg-white/5 p-3 flex flex-col gap-1">
@@ -134,6 +184,43 @@ export default function HudCard({
           ) : (
             <div>No source links — verify steps against the manual.</div>
           )}
+        </div>
+
+        <div className="flex flex-col gap-1">
+          <div className="text-xs font-semibold uppercase tracking-wide text-white/60">
+            Guides via iFixit
+          </div>
+          {guides !== undefined &&
+            (guides.length > 0 ? (
+              <ul className="flex flex-col gap-0.5">
+                {guides.map((guide, i) => (
+                  <li key={`${guide.url}-${i}`} className="text-sm text-white/85">
+                    <a
+                      href={guide.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-cyan-300 underline"
+                    >
+                      {guide.title}
+                    </a>
+                    {guide.difficulty && (
+                      <span className="text-white/60"> · {guide.difficulty}</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <div className="text-sm text-white/70">No iFixit guides found for this part.</div>
+            ))}
+          <div className="text-xs text-white/60">External links open iFixit in a new tab.</div>
+          <a
+            href={ifixitSearchUrl(guidance.title)}
+            target="_blank"
+            rel="noreferrer"
+            className="text-sm text-cyan-300 underline"
+          >
+            Search iFixit for {guidance.title}
+          </a>
         </div>
       </div>
 

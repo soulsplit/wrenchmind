@@ -2,11 +2,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   BURST_INTERVAL_MS,
   FRAME_BURST,
+  MAX_IDENTIFY_LABEL,
   captureFrameBurst,
   captureThumbnail,
   captureVideoFrame,
+  cropRegion,
   extractLabelText,
   hasApiKey,
+  identifyComponent,
   reasonSpatial,
   segmentImage,
 } from './metaApi'
@@ -252,6 +255,28 @@ describe('extractLabelText', () => {
     expect(body.messages[1].content[1].image_url.url).toBe('data:image/jpeg;base64,AAA')
   })
 
+  it('demands verbatim transcription with no invented characters', async () => {
+    vi.stubEnv('VITE_META_MODEL_API_KEY', 'k')
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue(
+      jsonResponse(sparkEnvelope(JSON.stringify({ findings: ['ABC-123'] }))),
+    )
+
+    await extractLabelText('img')
+    const [, init] = fetchMock.mock.calls[0] as [string, { body: string }]
+    const body = JSON.parse(init.body) as {
+      messages: [{ content: string }, { content: [{ text: string }] }]
+    }
+    const system: string = body.messages[0].content
+    expect(system).toContain('verbatim')
+    expect(system).toContain('never paraphrase')
+    expect(system).toContain('invent characters')
+    expect(system).toContain('key-value pairs together')
+    expect(system).toContain('0/O')
+    expect(system).toContain('small print')
+    expect(body.messages[1].content[0].text).toContain('verbatim')
+  })
+
   it('sanitizes findings: trims, drops non-strings and empties, caps at 10', async () => {
     vi.stubEnv('VITE_META_MODEL_API_KEY', 'k')
     vi.stubGlobal('fetch', fetchMock)
@@ -348,6 +373,50 @@ describe('segmentImage', () => {
     }
     expect(body.input[0].content[0].text).toBe('screw')
     expect(body.metadata).toEqual({ mask_encoding: 'one_bit' })
+  })
+
+  it('sends a box prompt plus center point for a circled region', async () => {
+    vi.stubEnv('VITE_META_MODEL_API_KEY', 'k')
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue(sseResponse([]))
+
+    await collect(
+      segmentImage('img', 'circled part', undefined, {
+        x1: 10,
+        y1: 20,
+        x2: 30,
+        y2: 40,
+        width: 640,
+        height: 480,
+      }),
+    )
+    const [, init] = fetchMock.mock.calls[0] as [string, { body: string }]
+    const body = JSON.parse(init.body) as {
+      input: [{ content: [{ text: string }] }]
+    }
+    expect(body.input[0].content[0].text).toBe(
+      '<0f>1<|box;x1=10;y1=20;x2=30;y2=40;w=640;h=480|><|point;x=20;y=30;w=640;h=480|>',
+    )
+  })
+
+  it('ignores a degenerate box and falls back to the point prompt', async () => {
+    vi.stubEnv('VITE_META_MODEL_API_KEY', 'k')
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue(sseResponse([]))
+
+    await collect(
+      segmentImage(
+        'img',
+        'screw',
+        { x: 320, y: 120, width: 640, height: 480 },
+        { x1: 30, y1: 40, x2: 10, y2: 20, width: 640, height: 480 },
+      ),
+    )
+    const [, init] = fetchMock.mock.calls[0] as [string, { body: string }]
+    const body = JSON.parse(init.body) as {
+      input: [{ content: [{ text: string }] }]
+    }
+    expect(body.input[0].content[0].text).toBe('<0f>1<|point;x=320;y=120;w=640;h=480|>')
   })
 
   it('throws on HTTP errors', async () => {
@@ -474,6 +543,38 @@ describe('captureVideoFrame', () => {
       ctxSpy.mockRestore()
     }
   })
+
+  it('downscales 4K frames to 1920 on the longest side', () => {
+    const drawImage = vi.fn()
+    const ctxSpy = vi
+      .spyOn(window.HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue({ drawImage } as unknown as CanvasRenderingContext2D)
+    try {
+      const video = document.createElement('video')
+      Object.defineProperty(video, 'videoWidth', { value: 3840, configurable: true })
+      Object.defineProperty(video, 'videoHeight', { value: 2160, configurable: true })
+      captureVideoFrame(video)
+      expect(drawImage).toHaveBeenCalledWith(video, 0, 0, 1920, 1080)
+    } finally {
+      ctxSpy.mockRestore()
+    }
+  })
+
+  it('passes smaller frames through uncapped', () => {
+    const drawImage = vi.fn()
+    const ctxSpy = vi
+      .spyOn(window.HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue({ drawImage } as unknown as CanvasRenderingContext2D)
+    try {
+      const video = document.createElement('video')
+      Object.defineProperty(video, 'videoWidth', { value: 1280, configurable: true })
+      Object.defineProperty(video, 'videoHeight', { value: 720, configurable: true })
+      captureVideoFrame(video)
+      expect(drawImage).toHaveBeenCalledWith(video, 0, 0, 1280, 720)
+    } finally {
+      ctxSpy.mockRestore()
+    }
+  })
 })
 
 describe('captureThumbnail', () => {
@@ -512,5 +613,145 @@ describe('captureThumbnail', () => {
     } finally {
       ctxSpy.mockRestore()
     }
+  })
+})
+
+describe('cropRegion', () => {
+  function sizedVideo(w: number, h: number): HTMLVideoElement {
+    const video = document.createElement('video')
+    Object.defineProperty(video, 'videoWidth', { value: w, configurable: true })
+    Object.defineProperty(video, 'videoHeight', { value: h, configurable: true })
+    return video
+  }
+
+  it('returns empty string when no frame is available', () => {
+    expect(cropRegion(document.createElement('video'), { x1: 0, y1: 0, x2: 10, y2: 10 })).toBe(
+      '',
+    )
+    expect(
+      cropRegion(sizedVideo(0, 480), { x1: 0, y1: 0, x2: 10, y2: 10 }),
+    ).toBe('')
+  })
+
+  it('crops the padded box with a 9-arg drawImage', () => {
+    const drawImage = vi.fn()
+    const ctxSpy = vi
+      .spyOn(window.HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue({ drawImage } as unknown as CanvasRenderingContext2D)
+    try {
+      const video = sizedVideo(640, 480)
+      expect(cropRegion(video, { x1: 100, y1: 100, x2: 199, y2: 199 })).toBe(
+        'data:image/jpeg;base64,',
+      )
+      // 100x100 box with 20% padding grows 20px on every side.
+      expect(drawImage).toHaveBeenCalledWith(video, 80, 80, 140, 140, 0, 0, 140, 140)
+    } finally {
+      ctxSpy.mockRestore()
+    }
+  })
+
+  it('clamps padding at the frame edges', () => {
+    const drawImage = vi.fn()
+    const ctxSpy = vi
+      .spyOn(window.HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue({ drawImage } as unknown as CanvasRenderingContext2D)
+    try {
+      const video = sizedVideo(640, 480)
+      cropRegion(video, { x1: 0, y1: 0, x2: 49, y2: 49 })
+      // 50x50 box pads 10px; the left/top clamp to the frame edge.
+      expect(drawImage).toHaveBeenCalledWith(video, 0, 0, 60, 60, 0, 0, 60, 60)
+      drawImage.mockClear()
+      cropRegion(video, { x1: 600, y1: 440, x2: 639, y2: 479 })
+      // 40x40 box pads 8px; the right/bottom clamp to the frame edge.
+      expect(drawImage).toHaveBeenCalledWith(video, 592, 432, 48, 48, 0, 0, 48, 48)
+    } finally {
+      ctxSpy.mockRestore()
+    }
+  })
+
+  it('honors a zero pad fraction', () => {
+    const drawImage = vi.fn()
+    const ctxSpy = vi
+      .spyOn(window.HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue({ drawImage } as unknown as CanvasRenderingContext2D)
+    try {
+      const video = sizedVideo(640, 480)
+      cropRegion(video, { x1: 100, y1: 100, x2: 199, y2: 199 }, 0)
+      expect(drawImage).toHaveBeenCalledWith(video, 100, 100, 100, 100, 0, 0, 100, 100)
+    } finally {
+      ctxSpy.mockRestore()
+    }
+  })
+
+  it('returns empty string when the context is unavailable', () => {
+    const ctxSpy = vi
+      .spyOn(window.HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue(null)
+    try {
+      expect(
+        cropRegion(sizedVideo(640, 480), { x1: 0, y1: 0, x2: 10, y2: 10 }),
+      ).toBe('')
+    } finally {
+      ctxSpy.mockRestore()
+    }
+  })
+})
+
+describe('identifyComponent', () => {
+  it('names the component from the crop', async () => {
+    vi.stubEnv('VITE_META_MODEL_API_KEY', 'k')
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue(
+      jsonResponse(sparkEnvelope(JSON.stringify({ label: 'M6 hex bolt' }))),
+    )
+
+    await expect(identifyComponent('data:image/jpeg;base64,CROP')).resolves.toBe('M6 hex bolt')
+    const [url, init] = fetchMock.mock.calls[0] as [
+      string,
+      { headers: Record<string, string>; body: string },
+    ]
+    expect(url).toBe('https://api.meta.ai/v1/chat/completions')
+    expect(init.headers['Authorization']).toBe('Bearer k')
+    const body = JSON.parse(init.body) as {
+      model: string
+      messages: [{ content: string }, { content: [{ text: string }, { image_url: { url: string } }] }]
+    }
+    expect(body.model).toBe('muse-spark-1.3')
+    expect(body.messages[0].content).toContain('label')
+    expect(body.messages[1].content[1].image_url.url).toBe('data:image/jpeg;base64,CROP')
+  })
+
+  it('trims the label and caps it at the maximum length', async () => {
+    vi.stubEnv('VITE_META_MODEL_API_KEY', 'k')
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(sparkEnvelope(JSON.stringify({ label: '  M6 hex bolt  ' }))),
+    )
+    await expect(identifyComponent('img')).resolves.toBe('M6 hex bolt')
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(sparkEnvelope(JSON.stringify({ label: 'y'.repeat(200) }))),
+    )
+    const capped = await identifyComponent('img')
+    expect(capped).toBe('y'.repeat(MAX_IDENTIFY_LABEL))
+    expect(MAX_IDENTIFY_LABEL).toBe(80)
+  })
+
+  it('returns an empty string when the label is missing or malformed', async () => {
+    vi.stubEnv('VITE_META_MODEL_API_KEY', 'k')
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValueOnce(jsonResponse(sparkEnvelope(JSON.stringify({}))))
+    await expect(identifyComponent('img')).resolves.toBe('')
+    fetchMock.mockResolvedValueOnce(jsonResponse(sparkEnvelope(JSON.stringify({ label: 42 }))))
+    await expect(identifyComponent('img')).resolves.toBe('')
+    fetchMock.mockResolvedValueOnce(jsonResponse(sparkEnvelope(JSON.stringify({ label: '   ' }))))
+    await expect(identifyComponent('img')).resolves.toBe('')
+  })
+
+  it('throws on HTTP errors', async () => {
+    vi.stubEnv('VITE_META_MODEL_API_KEY', 'k')
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValueOnce(errorResponse(500, 'boom'))
+    await expect(identifyComponent('img')).rejects.toThrow('Muse Spark 500')
   })
 })
