@@ -398,7 +398,94 @@ describe('Scanner', () => {
     })
     expect(reasonSpatial).toHaveBeenCalledTimes(2)
     expect(vi.mocked(reasonSpatial).mock.calls[1][1]).toBe('phrase two')
+    // The queued phrase ran, but tracking stays locked on the first item.
+    expect(await screen.findByText('Blend door')).toBeInTheDocument()
+    expect(screen.queryByText('Screw')).not.toBeInTheDocument()
+  })
+
+  it('freezes visuals on locked follow-ups but still speaks the answer', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial)
+      .mockResolvedValueOnce({
+        target_label: 'Screw',
+        approx_x: 10,
+        approx_y: 10,
+        speech_response: 'first',
+        display_mode: 'speech_and_visual',
+      })
+      .mockResolvedValueOnce({
+        target_label: 'Bolt',
+        approx_x: 80,
+        approx_y: 80,
+        speech_response: 'second',
+        display_mode: 'speech_and_visual',
+      })
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show screws')
+    })
     expect(await screen.findByText('Screw')).toBeInTheDocument()
+    expect(screen.getByText('Tracking')).toBeInTheDocument()
+    const segments = vi.mocked(segmentImage).mock.calls.length
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show bolts')
+    })
+    expect(screen.getByText('Screw')).toBeInTheDocument()
+    expect(screen.queryByText('Bolt')).not.toBeInTheDocument()
+    expect(vi.mocked(segmentImage).mock.calls.length).toBe(segments)
+    expect(vi.mocked(fetchGuidance).mock.calls.length).toBe(1)
+    expect(reasonSpatial).toHaveBeenCalledTimes(2)
+    expect(speakText).toHaveBeenCalledWith('second')
+  })
+
+  it('re-targets after Scan Another Part unlocks tracking', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial)
+      .mockResolvedValueOnce({
+        target_label: 'Screw',
+        approx_x: 10,
+        approx_y: 10,
+        speech_response: null,
+        display_mode: 'visual_only',
+      })
+      .mockResolvedValueOnce({
+        target_label: 'Bolt',
+        approx_x: 80,
+        approx_y: 80,
+        speech_response: null,
+        display_mode: 'visual_only',
+      })
+    vi.mocked(fetchGuidance).mockResolvedValue(validGuidanceFixture)
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show screws')
+    })
+    expect(await screen.findByText('Screw')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('Scan Another Part'))
+    expect(screen.queryByText('Tracking')).not.toBeInTheDocument()
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show bolts')
+    })
+    expect(await screen.findByText('Bolt')).toBeInTheDocument()
+  })
+
+  it('unlocks tracking when switching cameras', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Screw',
+      approx_x: 10,
+      approx_y: 10,
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show screws')
+    })
+    expect(await screen.findByText('Tracking')).toBeInTheDocument()
+    openOverflow()
+    fireEvent.click(screen.getByRole('button', { name: 'Switch camera' }))
+    expect(screen.queryByText('Tracking')).not.toBeInTheDocument()
   })
 
   it('sends the burst to reasoning and the latest frame to segmentation', async () => {
@@ -595,7 +682,8 @@ describe('Scanner', () => {
       await act(async () => {
         releaseSecond(second)
       })
-      expect(segmentImage).toHaveBeenCalledTimes(2)
+      // Locked follow-up answers without re-segmenting.
+      expect(segmentImage).toHaveBeenCalledTimes(1)
     } finally {
       vi.useRealTimers()
     }
@@ -1265,6 +1353,7 @@ describe('Scanner states (Wave 3)', () => {
     const indicator = screen.getByText('Analyzing…')
     expect(indicator).toBeInTheDocument()
     expect(indicator.querySelector('span')).toHaveClass('motion-safe:animate-pulse')
+    expect(screen.getByRole('status', { name: 'Analyzing' })).toBeInTheDocument()
     await act(async () => {
       release({
         target_label: 'Screw',

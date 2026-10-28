@@ -54,7 +54,59 @@ export default function HudCard({
       <div className="min-h-0 overflow-y-auto flex flex-col gap-3">
         <h2 className="text-xl font-bold tracking-tight text-white">{guidance.title}</h2>
 
-        <div className="text-xs text-white/70 flex flex-col gap-0.5">
+        {step ? (
+          <div className="rounded-xl bg-white/5 p-3 flex flex-col gap-1">
+            <div className="text-xs font-semibold uppercase tracking-wide text-white/60">
+              Step {safeIndex + 1} of {steps.length}
+            </div>
+            <div className="text-lg font-semibold text-white">{step.title}</div>
+            <div className="text-base text-white/85">{step.detail}</div>
+            {step.warning && <div className="text-base text-amber-300">⚠ {step.warning}</div>}
+          </div>
+        ) : (
+          <div className="text-base text-white/70">No steps available.</div>
+        )}
+
+        {guidance.specs.length > 0 && (
+          <div className="flex flex-col gap-1">
+            <div className="text-xs font-semibold uppercase tracking-wide text-white/60">
+              Specs
+            </div>
+            <ul className="flex flex-col gap-0.5">
+              {guidance.specs.map((spec, i) => (
+                <li key={`${spec.label}-${i}`} className="text-sm font-mono text-white/85">
+                  {spec.label}: {spec.value}
+                </li>
+              ))}
+            </ul>
+            <div className="text-xs text-amber-200/80">Verify all specs against the manual.</div>
+          </div>
+        )}
+
+        {guidance.tools.length > 0 && (
+          <div className="text-sm text-white/70">Tools: {guidance.tools.join(', ')}</div>
+        )}
+
+        <div className="flex flex-col gap-1">
+          <div className="text-xs font-semibold uppercase tracking-wide text-amber-300/90">
+            Warnings
+          </div>
+          {guidance.warnings.length > 0 ? (
+            <ul className="flex flex-col gap-1">
+              {guidance.warnings.map((warning, i) => (
+                <li key={`${warning}-${i}`} className="text-base text-amber-200">
+                  ⚠ {warning}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div className="text-base text-amber-200/80">
+              No specific warnings listed — verify all work against the manual.
+            </div>
+          )}
+        </div>
+
+        <div className="text-sm text-white/70 flex flex-col gap-0.5">
           {guidance.manualTitle ? (
             <div>
               Manual: <span className="text-white/90">{guidance.manualTitle}</span>
@@ -83,60 +135,6 @@ export default function HudCard({
             <div>No source links — verify steps against the manual.</div>
           )}
         </div>
-
-        {step ? (
-          <div className="rounded-xl bg-white/5 p-3 flex flex-col gap-1">
-            <div className="text-[10px] font-semibold uppercase tracking-wide text-white/60">
-              Step {safeIndex + 1} of {steps.length}
-            </div>
-            <div className="text-base font-semibold text-white">{step.title}</div>
-            <div className="text-sm text-white/85">{step.detail}</div>
-            {step.warning && <div className="text-sm text-amber-300">⚠ {step.warning}</div>}
-          </div>
-        ) : (
-          <div className="text-sm text-white/70">No steps available.</div>
-        )}
-
-        <div className="flex flex-col gap-1">
-          <div className="text-[10px] font-semibold uppercase tracking-wide text-amber-300/90">
-            Warnings
-          </div>
-          {guidance.warnings.length > 0 ? (
-            <ul className="flex flex-col gap-1">
-              {guidance.warnings.map((warning, i) => (
-                <li key={`${warning}-${i}`} className="text-sm text-amber-200">
-                  ⚠ {warning}
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <div className="text-sm text-amber-200/80">
-              No specific warnings listed — verify all work against the manual.
-            </div>
-          )}
-        </div>
-
-        {guidance.specs.length > 0 && (
-          <div className="flex flex-col gap-1">
-            <div className="text-[10px] font-semibold uppercase tracking-wide text-white/60">
-              Specs
-            </div>
-            <ul className="flex flex-col gap-0.5">
-              {guidance.specs.map((spec, i) => (
-                <li key={`${spec.label}-${i}`} className="text-xs font-mono text-white/85">
-                  {spec.label}: {spec.value}
-                </li>
-              ))}
-            </ul>
-            <div className="text-[11px] text-amber-200/80">
-              Verify all specs against the manual.
-            </div>
-          </div>
-        )}
-
-        {guidance.tools.length > 0 && (
-          <div className="text-xs text-white/70">Tools: {guidance.tools.join(', ')}</div>
-        )}
       </div>
 
       <div className="flex flex-col gap-2">

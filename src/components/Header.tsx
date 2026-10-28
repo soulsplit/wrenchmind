@@ -9,6 +9,8 @@ interface HeaderProps {
   status: Status
   /** True while a camera stream is attached and playing; badge dims otherwise. */
   live: boolean
+  /** True while locked onto an identified item; follow-ups answer by voice. */
+  tracking: boolean
   voiceOn: boolean
   onVoiceToggle: (next: boolean) => void
   /** Actual facing from the stream's track settings; 'unknown' (desktop) renders CAMERA. */
@@ -29,6 +31,7 @@ interface HeaderProps {
 export default function Header({
   status,
   live,
+  tracking,
   voiceOn,
   onVoiceToggle,
   facing,
@@ -119,6 +122,12 @@ export default function Header({
               : facing === 'user'
                 ? 'FRONT CAMERA'
                 : 'CAMERA'}
+          </span>
+        )}
+        {tracking && (
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-black/70 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-cyan-300">
+            <span className="inline-block h-1.5 w-1.5 rounded-full bg-cyan-300" aria-hidden="true" />
+            Tracking
           </span>
         )}
         <StatusBar status={status} />

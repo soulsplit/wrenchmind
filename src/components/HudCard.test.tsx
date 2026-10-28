@@ -146,6 +146,33 @@ describe('HudCard', () => {
     expect(props.onScanAnother).toHaveBeenCalledTimes(1)
   })
 
+  it('orders steps first and sources last', () => {
+    renderCard(validGuidanceFixture)
+    const nodes = [
+      screen.getByText('MID-DRIVE DRIVE BELT'),
+      screen.getByText('Step 1 of 3'),
+      screen.getByText('Specs'),
+      screen.getByText('Tools: T25 Torx, Torque wrench'),
+      screen.getByText('Warnings'),
+      screen.getByRole('link', { name: 'Example Service Manual, Belt Drive chapter' }),
+    ]
+    expect(nodes).toHaveLength(6)
+    nodes.reduce((prev, next) => {
+      expect(prev.compareDocumentPosition(next) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+      return next
+    })
+  })
+
+  it('uses the enlarged card type ramp', () => {
+    renderCard(validGuidanceFixture)
+    expect(screen.getByText('Remove the belt cover')).toHaveClass('text-lg')
+    expect(
+      screen.getByText('Undo the four cover screws and lift the cover clear of the drive.'),
+    ).toHaveClass('text-base')
+    expect(screen.getByText('Step 1 of 3')).toHaveClass('text-xs')
+    expect(screen.getByText('Specs')).toHaveClass('text-xs')
+  })
+
   it('shows a skeleton while guidance is pending', () => {
     renderCard(null, { pending: true })
     expect(screen.getByRole('status', { name: 'Loading guidance' })).toBeInTheDocument()

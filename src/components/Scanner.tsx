@@ -106,6 +106,12 @@ export default function Scanner() {
   voiceOnRef.current = voiceOn
   const busyRef = useRef(false)
   const pendingRef = useRef<string | null>(null)
+  // Tracking lock: once an item is identified, follow-up phrases answer by
+  // voice without re-marking. Ref is the source of truth for handlePhrase
+  // (keeps its identity stable for the voice lifecycle effect); state mirrors
+  // it for rendering. Both are always assigned together.
+  const trackingRef = useRef(false)
+  const [tracking, setTracking] = useState(false)
   const targetRef = useRef<RefreshTarget | null>(null)
   const refreshRef = useRef<number | null>(null)
   const [facing, setFacing] = useState<'environment' | 'user'>('environment')
@@ -373,14 +379,14 @@ export default function Scanner() {
         const result = await reasonSpatial(frames, phrase, ctxStr)
         if (!result.target_label) {
           logWarn('reason', 'no target in response')
-          setEmptyTarget(true)
+          if (!trackingRef.current) setEmptyTarget(true)
         } else {
           logInfo(
             'reason',
             `"${result.target_label}" @ (${result.approx_x},${result.approx_y}) [${result.display_mode}]`,
           )
         }
-        if (result.target_label) {
+        if (result.target_label && !trackingRef.current) {
           const kind = classifyTarget(result.target_label)
           const point = toPixelPoint(
             result.approx_x,
@@ -415,6 +421,10 @@ export default function Scanner() {
           draw()
           armRefresh(result.target_label, result.approx_x, result.approx_y)
           requestGuidance(result.target_label, phrase, ctxStr)
+          trackingRef.current = true
+          setTracking(true)
+        } else if (trackingRef.current) {
+          logDebug('phrase', 'tracking locked — visuals frozen, answering by voice')
         }
         // Speak only in speech_and_visual mode with a non-null response.
         // visual_only and null responses stay silent (visual-only).
@@ -475,6 +485,8 @@ export default function Scanner() {
     assistantRef.current?.clearMemory()
     clearRefresh()
     cancelSpeech()
+    trackingRef.current = false
+    setTracking(false)
     setCallout(null)
     setEmptyTarget(false)
     // Invalidate any in-flight guidance fetch and drop the HUD card.
@@ -542,6 +554,7 @@ export default function Scanner() {
       <Header
         status={status}
         live={cameraLive}
+        tracking={tracking}
         voiceOn={voiceOn}
         onVoiceToggle={(next) => void handleToggle(next)}
         facing={actualFacing}
@@ -620,13 +633,14 @@ export default function Scanner() {
           </div>
         )}
         {/*
-          Visual-only processing echo: the Header status badge owns the
-          screen-reader announcement, so this stays aria-hidden to avoid a
-          double announcement. Motion is gated behind motion-safe.
+          Processing indicator: the top badge hides while analyzing, so this
+          owns the screen-reader announcement. Motion is gated behind
+          motion-safe.
         */}
         {status === 'analyzing' && (
           <div
-            aria-hidden="true"
+            role="status"
+            aria-label="Analyzing"
             className="pointer-events-none self-start inline-flex items-center gap-2 rounded-full bg-black/70 px-3 py-1.5 text-xs font-semibold text-white"
           >
             <span className="motion-safe:animate-pulse inline-block h-2 w-2 rounded-full bg-cyan-300" />

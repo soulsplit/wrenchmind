@@ -4,14 +4,18 @@ import StatusBar from './StatusBar'
 import type { Status } from '../types'
 
 describe('StatusBar', () => {
-  it.each<[Status, string]>([
+  it.each<[Exclude<Status, 'analyzing'>, string]>([
     ['off', '[ OFF ]'],
     ['listening', '[ 🟢 LISTENING... ]'],
-    ['analyzing', '[ ⚡ ANALYZING... ]'],
     ['error', '[ ⚠ ERROR ]'],
   ])('renders %s as %s', (status, label) => {
     render(<StatusBar status={status} />)
     const el = screen.getByRole('status')
     expect(el).toHaveTextContent(label)
+  })
+
+  it('renders nothing while analyzing (the dock pill owns that state)', () => {
+    const { container } = render(<StatusBar status="analyzing" />)
+    expect(container).toBeEmptyDOMElement()
   })
 })

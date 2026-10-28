@@ -6,6 +6,7 @@ function renderHeader(overrides: Partial<Parameters<typeof Header>[0]> = {}) {
   const props = {
     status: 'off' as const,
     live: true,
+    tracking: false,
     voiceOn: false,
     onVoiceToggle: vi.fn(),
     facing: 'environment' as const,
@@ -45,6 +46,16 @@ describe('Header', () => {
     renderHeader({ facing: 'unknown' })
     expect(screen.getByText('CAMERA')).toBeInTheDocument()
     expect(screen.queryByText('REAR CAMERA')).not.toBeInTheDocument()
+  })
+
+  it('shows the TRACKING badge while locked onto an item', () => {
+    renderHeader({ tracking: true })
+    expect(screen.getByText('Tracking')).toBeInTheDocument()
+  })
+
+  it('hides the TRACKING badge when idle', () => {
+    renderHeader()
+    expect(screen.queryByText('Tracking')).not.toBeInTheDocument()
   })
 
   it('shows the front-camera badge when facing the user', () => {
