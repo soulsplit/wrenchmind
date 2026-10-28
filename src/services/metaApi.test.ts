@@ -3,6 +3,7 @@ import {
   BURST_INTERVAL_MS,
   FRAME_BURST,
   MAX_IDENTIFY_LABEL,
+  captureDims,
   captureFrameBurst,
   captureThumbnail,
   captureVideoFrame,
@@ -12,6 +13,8 @@ import {
   identifyComponent,
   reasonSpatial,
   segmentImage,
+  toCaptureBox,
+  toCapturePoint,
 } from './metaApi'
 import { clearLogs, getLogs } from './logger'
 
@@ -574,6 +577,69 @@ describe('captureVideoFrame', () => {
     } finally {
       ctxSpy.mockRestore()
     }
+  })
+})
+
+describe('captureDims', () => {
+  it('reports the 1920-capped dims and scale for 4K frames', () => {
+    expect(captureDims(3840, 2160)).toEqual({ width: 1920, height: 1080, scale: 0.5 })
+  })
+
+  it('reports identity dims for frames under the cap', () => {
+    expect(captureDims(640, 480)).toEqual({ width: 640, height: 480, scale: 1 })
+  })
+
+  it('defensively reports scale 1 without a frame', () => {
+    expect(captureDims(0, 480)).toEqual({ width: 0, height: 480, scale: 1 })
+  })
+})
+
+describe('toCapturePoint', () => {
+  it('passes points through at scale 1', () => {
+    expect(
+      toCapturePoint({ x: 320, y: 240, width: 640, height: 480 }, captureDims(640, 480)),
+    ).toEqual({ x: 320, y: 240, width: 640, height: 480 })
+  })
+
+  it('scales points into capture space with capture dims', () => {
+    expect(
+      toCapturePoint({ x: 3200, y: 1800, width: 3840, height: 2160 }, captureDims(3840, 2160)),
+    ).toEqual({ x: 1600, y: 900, width: 1920, height: 1080 })
+  })
+
+  it('clamps to the capture frame', () => {
+    expect(
+      toCapturePoint({ x: 9999, y: -5, width: 3840, height: 2160 }, captureDims(3840, 2160)),
+    ).toEqual({ x: 1919, y: 0, width: 1920, height: 1080 })
+  })
+})
+
+describe('toCaptureBox', () => {
+  it('scales boxes into capture space with capture dims', () => {
+    expect(
+      toCaptureBox(
+        { x1: 200, y1: 200, x2: 400, y2: 400, width: 3840, height: 2160 },
+        captureDims(3840, 2160),
+      ),
+    ).toEqual({ x1: 100, y1: 100, x2: 200, y2: 200, width: 1920, height: 1080 })
+  })
+
+  it('keeps collapsed boxes strict', () => {
+    const box = toCaptureBox(
+      { x1: 200, y1: 200, x2: 201, y2: 201, width: 3840, height: 2160 },
+      captureDims(3840, 2160),
+    )
+    expect(box.x2).toBeGreaterThan(box.x1)
+    expect(box.y2).toBeGreaterThan(box.y1)
+    expect(box.width).toBe(1920)
+  })
+
+  it('repairs edge-clipped boxes inward', () => {
+    const box = toCaptureBox(
+      { x1: 3838, y1: 2158, x2: 3839, y2: 2159, width: 3840, height: 2160 },
+      captureDims(3840, 2160),
+    )
+    expect(box).toEqual({ x1: 1918, y1: 1078, x2: 1919, y2: 1079, width: 1920, height: 1080 })
   })
 })
 

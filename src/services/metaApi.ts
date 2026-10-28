@@ -50,19 +50,38 @@ async function fetchWithTimeout(
  */
 export const API_CAPTURE_MAX_SIDE = 1920
 
+/** Dimensions of a captured frame plus the uniform downscale factor. */
+export interface CaptureDims {
+  width: number
+  height: number
+  scale: number
+}
+
+/**
+ * Dimensions `captureVideoFrame` produces for a source frame. Single source
+ * of truth for the downscale so SAM prompts can be converted into capture
+ * space and records mapped back. Defensive zeros when no frame exists.
+ */
+export function captureDims(videoW: number, videoH: number): CaptureDims {
+  if (!videoW || !videoH) return { width: videoW, height: videoH, scale: 1 }
+  const scale = Math.min(1, API_CAPTURE_MAX_SIDE / Math.max(videoW, videoH))
+  return {
+    width: Math.max(1, Math.floor(videoW * scale)),
+    height: Math.max(1, Math.floor(videoH * scale)),
+    scale,
+  }
+}
+
 /**
  * Capture the current video frame as a base64 JPEG data URL, downscaled to
  * API_CAPTURE_MAX_SIDE on the longest side. Never upscales.
  */
 export function captureVideoFrame(video: HTMLVideoElement): string {
   if (!video.videoWidth || !video.videoHeight) return ''
-  const scale = Math.min(
-    1,
-    API_CAPTURE_MAX_SIDE / Math.max(video.videoWidth, video.videoHeight),
-  )
+  const cap = captureDims(video.videoWidth, video.videoHeight)
   const c = document.createElement('canvas')
-  c.width = Math.max(1, Math.floor(video.videoWidth * scale))
-  c.height = Math.max(1, Math.floor(video.videoHeight * scale))
+  c.width = cap.width
+  c.height = cap.height
   const ctx = c.getContext('2d')
   if (!ctx) return ''
   ctx.drawImage(video, 0, 0, c.width, c.height)
@@ -352,11 +371,49 @@ export interface SamStreamEvent {
 }
 
 /**
+ * Convert a source-video point prompt into capture space. Prompts must
+ * describe the attached (possibly downscaled) image, not the live frame.
+ */
+export function toCapturePoint(p: SamPointPrompt, cap: CaptureDims): SamPointPrompt {
+  return {
+    x: Math.min(cap.width - 1, Math.max(0, Math.round(p.x * cap.scale))),
+    y: Math.min(cap.height - 1, Math.max(0, Math.round(p.y * cap.scale))),
+    width: cap.width,
+    height: cap.height,
+  }
+}
+
+/**
+ * Convert a source-video box prompt (inclusive corners) into capture
+ * space. Guarantees a strict, in-bounds box so downscaling can never
+ * collapse or edge-clip it into something the prompt grammar rejects.
+ */
+export function toCaptureBox(b: SamBoxPrompt, cap: CaptureDims): SamBoxPrompt {
+  let x1 = Math.min(cap.width - 1, Math.max(0, Math.floor(b.x1 * cap.scale)))
+  let y1 = Math.min(cap.height - 1, Math.max(0, Math.floor(b.y1 * cap.scale)))
+  let x2 = Math.min(cap.width - 1, Math.max(0, Math.floor(b.x2 * cap.scale)))
+  let y2 = Math.min(cap.height - 1, Math.max(0, Math.floor(b.y2 * cap.scale)))
+  // Unrepairable in a sub-2px capture: leave collapsed so segmentImage
+  // ignores the box and falls back to the noun phrase.
+  if (x2 <= x1 && cap.width > 1) {
+    if (x1 + 1 < cap.width) x2 = x1 + 1
+    else x1 = x2 - 1
+  }
+  if (y2 <= y1 && cap.height > 1) {
+    if (y1 + 1 < cap.height) y2 = y1 + 1
+    else y1 = y2 - 1
+  }
+  return { x1, y1, x2, y2, width: cap.width, height: cap.height }
+}
+
+/**
  * Segment an image: concept phrase when only a label is known, a point
  * prompt when the target is already located, a box prompt (plus its center
  * point) for a circled region, or one object per point for plural targets
- * — a single call isolates every instance. Yields raw stream events for
- * the SAM parser; use `parseSamStream` to consume them.
+ * — a single call isolates every instance. Prompts must already be in the
+ * attached image's pixel space (see `toCapturePoint`/`toCaptureBox`).
+ * Yields raw stream events for the SAM parser; use `parseSamStream` to
+ * consume them.
  */
 export async function* segmentImage(
   imageBase64: string,

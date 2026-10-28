@@ -8,6 +8,7 @@ import type {
   Status,
 } from '../types'
 import {
+  captureDims,
   captureFrameBurst,
   captureThumbnail,
   captureVideoFrame,
@@ -15,6 +16,8 @@ import {
   hasApiKey,
   reasonSpatial,
   segmentImage,
+  toCaptureBox,
+  toCapturePoint,
 } from '../services/metaApi'
 import type { SamPointPrompt } from '../services/metaApi'
 import {
@@ -28,7 +31,7 @@ import {
   ZOOM_MIN,
   type ZoomState,
 } from '../services/feedStage'
-import { parseSamStream } from '../services/samParser'
+import { parseSamStream, scaleRecordToVideo } from '../services/samParser'
 import { cancelSpeech, speakText } from '../services/speechOutput'
 import { fetchGuidance } from '../services/guidanceApi'
 import { buildQuery, searchGuides, type FixitGuide } from '../services/ifixitApi'
@@ -459,11 +462,15 @@ export default function Scanner() {
     try {
       const img = captureVideoFrame(video)
       if (!img) return
+      const cap = captureDims(video.videoWidth, video.videoHeight)
       const pixelPts = target.points
         .map((p) => toPixelPoint(p.x, p.y, video.videoWidth, video.videoHeight))
         .filter((p): p is SamPointPrompt => p !== undefined)
+        .map((p) => toCapturePoint(p, cap))
       const prompt = pixelPts.length > 1 ? pixelPts : pixelPts[0]
-      const recs = await parseSamStream(segmentImage(img, target.label, prompt))
+      const recs = (
+        await parseSamStream(segmentImage(img, target.label, prompt))
+      ).map((rec) => scaleRecordToVideo(rec, cap.width, cap.height, video.videoWidth, video.videoHeight))
       if (targetRef.current !== target) return
       const kind = classifyTarget(target.label)
       const spans = recs
@@ -704,12 +711,16 @@ export default function Scanner() {
             result.points && result.points.length > 1
               ? result.points
               : [{ x: result.approx_x, y: result.approx_y }]
+          const cap = captureDims(video.videoWidth, video.videoHeight)
           const pixelPts = targetPts
             .map((p) => toPixelPoint(p.x, p.y, video.videoWidth, video.videoHeight))
             .filter((p): p is SamPointPrompt => p !== undefined)
+            .map((p) => toCapturePoint(p, cap))
           const prompt = pixelPts.length > 1 ? pixelPts : pixelPts[0]
-          const recs = await parseSamStream(
-            segmentImage(img, result.target_label, prompt),
+          const recs = (
+            await parseSamStream(segmentImage(img, result.target_label, prompt))
+          ).map((rec) =>
+            scaleRecordToVideo(rec, cap.width, cap.height, video.videoWidth, video.videoHeight),
           )
           const spans = recs
             .slice(0, 3)
@@ -834,7 +845,12 @@ export default function Scanner() {
         const img = captureVideoFrame(video)
         if (!img) throw new Error('No video frame')
         logInfo('tap', `tap @ (${tap.x.toFixed(1)},${tap.y.toFixed(1)})`)
-        const recs = await parseSamStream(segmentImage(img, 'tapped part', tap.point))
+        const cap = captureDims(video.videoWidth, video.videoHeight)
+        const recs = (
+          await parseSamStream(
+            segmentImage(img, 'tapped part', toCapturePoint(tap.point, cap)),
+          )
+        ).map((rec) => scaleRecordToVideo(rec, cap.width, cap.height, video.videoWidth, video.videoHeight))
         const largest = largestMask(recs)
         const targetBox = largest
           ? largest.box
@@ -906,13 +922,24 @@ export default function Scanner() {
         const img = captureVideoFrame(video)
         if (!img) throw new Error('No video frame')
         logInfo('circle', `region @ (${region.x.toFixed(1)},${region.y.toFixed(1)})`)
-        const recs = await parseSamStream(
-          segmentImage(img, 'circled part', undefined, {
-            ...region.box,
-            width: video.videoWidth,
-            height: video.videoHeight,
-          }),
-        )
+        const cap = captureDims(video.videoWidth, video.videoHeight)
+        const recs = (
+          await parseSamStream(
+            segmentImage(
+              img,
+              'circled part',
+              undefined,
+              toCaptureBox(
+                {
+                  ...region.box,
+                  width: video.videoWidth,
+                  height: video.videoHeight,
+                },
+                cap,
+              ),
+            ),
+          )
+        ).map((rec) => scaleRecordToVideo(rec, cap.width, cap.height, video.videoWidth, video.videoHeight))
         const largest = largestMask(recs)
         const targetBox = largest ? largest.box : region.box
         const name = await identifyWithContext(video, targetBox)

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { decodeMaskToRaster, parseImageStream } from '@meta-sam/parser'
-import { parseSamStream } from './samParser'
+import { parseSamStream, scaleRecordToVideo } from './samParser'
+import type { MaskRecord } from '../types'
 
 vi.mock('@meta-sam/parser', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@meta-sam/parser')>()
@@ -151,5 +152,45 @@ describe('parseSamStream', () => {
       '1<|box;x1=5;y1=5;x2=6;y2=5;w=100;h=100|><|mask;x=0;y=0;data=2,1,!x|>'
     const recs = await parseSamStream(events(`<0f>${good},${bad}`))
     expect(recs.map((r) => r.objectId)).toEqual(['0'])
+  })
+})
+
+describe('scaleRecordToVideo', () => {
+  function record(box: MaskRecord['box'], raster: number[]): MaskRecord {
+    return {
+      frame: 0,
+      ordinal: 0,
+      objectId: '0',
+      box,
+      raster: Uint8Array.from(raster),
+    }
+  }
+
+  it('returns the same record when both spaces match', () => {
+    const rec = record({ x1: 1, y1: 2, x2: 3, y2: 4, w: 3, h: 3 }, [1, 0, 0, 0, 1, 0, 0, 0, 1])
+    expect(scaleRecordToVideo(rec, 640, 480, 640, 480)).toBe(rec)
+  })
+
+  it('upscales the box and raster nearest-neighbor', () => {
+    const rec = record({ x1: 10, y1: 20, x2: 11, y2: 21, w: 2, h: 2 }, [1, 0, 0, 1])
+    const mapped = scaleRecordToVideo(rec, 1920, 1080, 3840, 2160)
+    expect(mapped.box).toEqual({ x1: 20, y1: 40, x2: 23, y2: 43, w: 4, h: 4 })
+    expect(Array.from(mapped.raster)).toEqual([1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1])
+    expect(mapped.objectId).toBe('0')
+  })
+
+  it('keeps 1px boxes non-degenerate', () => {
+    const rec = record({ x1: 5, y1: 5, x2: 5, y2: 5, w: 1, h: 1 }, [1])
+    const mapped = scaleRecordToVideo(rec, 1920, 1080, 3840, 2160)
+    expect(mapped.box).toEqual({ x1: 10, y1: 10, x2: 11, y2: 11, w: 2, h: 2 })
+    expect(Array.from(mapped.raster)).toEqual([1, 1, 1, 1])
+  })
+
+  it('clamps to the video frame and empties missing rasters', () => {
+    const rec = record({ x1: 1919, y1: 1079, x2: 1919, y2: 1079, w: 1, h: 1 }, [])
+    const mapped = scaleRecordToVideo(rec, 1920, 1080, 3840, 2160)
+    expect(mapped.box.x2).toBe(3839)
+    expect(mapped.box.y2).toBe(2159)
+    expect(mapped.raster.length).toBe(0)
   })
 })

@@ -62,9 +62,10 @@ vi.mock('../services/metaApi', async (importOriginal) => {
   }
 })
 
-vi.mock('../services/samParser', () => ({
-  parseSamStream: vi.fn(async () => []),
-}))
+vi.mock('../services/samParser', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../services/samParser')>()
+  return { ...actual, parseSamStream: vi.fn(async () => []) }
+})
 
 vi.mock('../services/guidanceApi', () => ({
   fetchGuidance: vi.fn(),
@@ -3106,6 +3107,62 @@ describe('Scanner freeze frame', () => {
       fireEvent.click(screen.getByRole('switch', { name: 'Freeze frame' }))
       expect(await screen.findByText('LIVE')).toBeInTheDocument()
       expect(screen.queryByText('Drag to circle a part · tap to identify')).not.toBeInTheDocument()
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('sends capture-space prompts and remaps records on 4K video (circle)', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 3840, 2160)
+      await freezeFrame()
+      setStageDims(320, 240)
+      vi.mocked(parseSamStream).mockResolvedValueOnce([
+        maskRecord({ x1: 690, y1: 450, x2: 1140, y2: 900, w: 451, h: 451 }),
+      ])
+      const layer = tapTarget()
+      await act(async () => {
+        traceLoop(layer, 100, 100, 200, 200)
+      })
+      // Prompt describes the 1920x1080 attached image, not the 4K frame.
+      expect(segmentImage).toHaveBeenCalledWith(
+        'data:image/jpeg;base64,AAA',
+        'circled part',
+        undefined,
+        { x1: 690, y1: 450, x2: 1140, y2: 900, width: 1920, height: 1080 },
+      )
+      // The capture-space mask maps back to video pixels (±1px round-trip).
+      expect(cropRegion).toHaveBeenCalledWith(
+        expect.anything(),
+        { x1: 1380, y1: 900, x2: 2281, y2: 1801, w: 902, h: 902 },
+        0.2,
+      )
+      expect(await screen.findByText('M6 hex bolt')).toBeInTheDocument()
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('sends capture-space point prompts on 4K video (tap)', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 3840, 2160)
+      await freezeFrame()
+      const layer = tapTarget()
+      setTapRect(layer)
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 320, clientY: 240 })
+      })
+      expect(segmentImage).toHaveBeenCalledWith(
+        'data:image/jpeg;base64,AAA',
+        'tapped part',
+        { x: 960, y: 540, width: 1920, height: 1080 },
+      )
     } finally {
       media.restore()
     }

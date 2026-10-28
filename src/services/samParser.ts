@@ -77,6 +77,49 @@ export async function parseSamStream(
   return out
 }
 
+/**
+ * Scale a capture-space record back to source-video pixels (nearest
+ * neighbor): box corners map through the half-open form so 1px boxes stay
+ * non-degenerate, and the raster resamples to the mapped box. Returns the
+ * same record when both spaces match; clamps to the video frame.
+ */
+export function scaleRecordToVideo(
+  rec: MaskRecord,
+  fromW: number,
+  fromH: number,
+  toW: number,
+  toH: number,
+): MaskRecord {
+  if (!fromW || !fromH || !toW || !toH) return rec
+  if (fromW === toW && fromH === toH) return rec
+  const sx = toW / fromW
+  const sy = toH / fromH
+  const x1 = Math.min(toW - 1, Math.max(0, Math.round(rec.box.x1 * sx)))
+  const y1 = Math.min(toH - 1, Math.max(0, Math.round(rec.box.y1 * sy)))
+  const x2 = Math.min(toW - 1, Math.max(0, Math.round((rec.box.x2 + 1) * sx) - 1))
+  const y2 = Math.min(toH - 1, Math.max(0, Math.round((rec.box.y2 + 1) * sy) - 1))
+  const w = Math.max(1, x2 - x1 + 1)
+  const h = Math.max(1, y2 - y1 + 1)
+  const ow = rec.box.w
+  const oh = rec.box.h
+  let raster: Uint8Array
+  if (rec.raster.length === 0 || ow <= 0 || oh <= 0) {
+    raster = new Uint8Array(0)
+  } else if (ow === w && oh === h) {
+    raster = rec.raster
+  } else {
+    raster = new Uint8Array(w * h)
+    for (let y = 0; y < h; y++) {
+      const srcY = Math.min(oh - 1, Math.floor((y * oh) / h))
+      for (let x = 0; x < w; x++) {
+        const srcX = Math.min(ow - 1, Math.floor((x * ow) / w))
+        raster[y * w + x] = rec.raster[srcY * ow + srcX]
+      }
+    }
+  }
+  return { ...rec, box: { x1, y1, x2, y2, w, h }, raster }
+}
+
 interface TightBounds {
   minX: number
   minY: number
