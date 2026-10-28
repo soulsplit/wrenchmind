@@ -9,6 +9,7 @@ import {
 } from '../services/metaApi'
 import { parseSamStream } from '../services/samParser'
 import { fetchGuidance } from '../services/guidanceApi'
+import { cancelSpeech, speakText } from '../services/speechOutput'
 import type { SamStreamEvent } from '../services/metaApi'
 import type { VoiceAssistantCallbacks } from '../services/voiceAssistant'
 import type { GuidanceResult, SpatialResult } from '../types'
@@ -46,6 +47,13 @@ vi.mock('../services/samParser', () => ({
 
 vi.mock('../services/guidanceApi', () => ({
   fetchGuidance: vi.fn(),
+}))
+
+vi.mock('../services/speechOutput', () => ({
+  speakText: vi.fn(),
+  cancelSpeech: vi.fn(),
+  isSpeaking: vi.fn(),
+  getAvailableVoices: vi.fn(),
 }))
 
 vi.mock('../services/voiceAssistant', () => {
@@ -116,6 +124,8 @@ beforeEach(() => {
   vi.mocked(segmentImage).mockReset().mockReturnValue(emptyEvents())
   // Default mirrors the stub: guidance unavailable, AR pipeline unaffected.
   vi.mocked(fetchGuidance).mockReset().mockRejectedValue(new Error('not implemented'))
+  vi.mocked(speakText).mockReset().mockResolvedValue(undefined)
+  vi.mocked(cancelSpeech).mockReset()
 })
 
 afterEach(() => {
@@ -653,43 +663,51 @@ describe('Scanner', () => {
   })
 
   it('speaks confirmations in speech-and-visual mode', async () => {
-    const speak = vi.fn()
-    const cancel = vi.fn()
-    class FakeUtterance {
-      text: string
-      rate = 0
-      constructor(text: string) {
-        this.text = text
-      }
-    }
-    Object.defineProperty(window, 'speechSynthesis', {
-      value: { speak, cancel },
-      configurable: true,
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Screw',
+      approx_x: 10,
+      approx_y: 10,
+      speech_response: 'done',
+      display_mode: 'speech_and_visual',
     })
-    Object.defineProperty(window, 'SpeechSynthesisUtterance', {
-      value: FakeUtterance,
-      configurable: true,
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('go')
     })
-    try {
-      mockCamera(true)
-      vi.mocked(reasonSpatial).mockResolvedValue({
-        target_label: 'Screw',
-        approx_x: 10,
-        approx_y: 10,
-        speech_response: 'done',
-        display_mode: 'speech_and_visual',
-      })
-      render(<Scanner />)
-      await act(async () => {
-        assistants[0].callbacks.onPhrase('go')
-      })
-      expect(cancel).toHaveBeenCalledTimes(1)
-      expect(speak).toHaveBeenCalledTimes(1)
-      expect((speak.mock.calls[0][0] as FakeUtterance).text).toBe('done')
-    } finally {
-      delete (window as unknown as Record<string, unknown>)['speechSynthesis']
-      delete (window as unknown as Record<string, unknown>)['SpeechSynthesisUtterance']
-    }
+    expect(speakText).toHaveBeenCalledTimes(1)
+    expect(speakText).toHaveBeenCalledWith('done')
+  })
+
+  it('stays silent in visual-only mode', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Screw',
+      approx_x: 10,
+      approx_y: 10,
+      speech_response: 'done',
+      display_mode: 'visual_only',
+    })
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('go')
+    })
+    expect(speakText).not.toHaveBeenCalled()
+  })
+
+  it('stops speech when clearing the AR view', async () => {
+    mockCamera(true)
+    render(<Scanner />)
+    openOverflow()
+    fireEvent.click(screen.getByText('Clear AR View'))
+    expect(cancelSpeech).toHaveBeenCalled()
+  })
+
+  it('stops speech on unmount', async () => {
+    mockCamera(true)
+    const { unmount } = render(<Scanner />)
+    unmount()
+    expect(cancelSpeech).toHaveBeenCalled()
   })
 
   it.each<[string, string, string]>([

@@ -9,6 +9,7 @@ import {
 } from '../services/metaApi'
 import type { SamPointPrompt } from '../services/metaApi'
 import { parseSamStream } from '../services/samParser'
+import { cancelSpeech, speakText } from '../services/speechOutput'
 import { fetchGuidance } from '../services/guidanceApi'
 import { VoiceAssistant } from '../services/voiceAssistant'
 import { permissionBlocker, secureContextBlocker } from '../services/mediaSupport'
@@ -90,14 +91,6 @@ function toPixelPoint(
     width: w,
     height: h,
   }
-}
-
-function speak(text: string): void {
-  if (!('speechSynthesis' in window)) return
-  window.speechSynthesis.cancel()
-  const utterance = new SpeechSynthesisUtterance(text)
-  utterance.rate = 1
-  window.speechSynthesis.speak(utterance)
 }
 
 export default function Scanner() {
@@ -279,6 +272,8 @@ export default function Scanner() {
 
   useEffect(() => clearRefresh, [clearRefresh])
 
+  useEffect(() => () => cancelSpeech(), [])
+
   const tickRefresh = useCallback(async () => {
     refreshRef.current = null
     const target = targetRef.current
@@ -424,7 +419,7 @@ export default function Scanner() {
         // Speak only in speech_and_visual mode with a non-null response.
         // visual_only and null responses stay silent (visual-only).
         if (result.display_mode === 'speech_and_visual' && result.speech_response) {
-          speak(result.speech_response)
+          void speakText(result.speech_response)
         }
         setStatus(voiceOnRef.current ? 'listening' : 'off')
       } catch (e) {
@@ -469,6 +464,7 @@ export default function Scanner() {
     } else {
       assistant.stop()
       clearRefresh()
+      cancelSpeech()
       setVoiceOn(false)
       setStatus('off')
     }
@@ -478,6 +474,7 @@ export default function Scanner() {
     overlaysRef.current = []
     assistantRef.current?.clearMemory()
     clearRefresh()
+    cancelSpeech()
     setCallout(null)
     setEmptyTarget(false)
     // Invalidate any in-flight guidance fetch and drop the HUD card.
