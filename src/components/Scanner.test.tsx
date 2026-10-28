@@ -121,6 +121,32 @@ function openOverflow(): void {
   fireEvent.click(screen.getByRole('button', { name: 'More options' }))
 }
 
+function torchStream(applyImpl?: () => Promise<void>): {
+  stream: MediaStream
+  applyConstraints: Mock
+} {
+  const applyConstraints = vi.fn(applyImpl ?? (async () => {}))
+  const stream = new MediaStream()
+  if (typeof stream.getTracks !== 'function') {
+    stream.getTracks = () => []
+  }
+  const track = {
+    stop: vi.fn(),
+    getSettings: () => ({ facingMode: 'environment' }),
+    getCapabilities: () => ({ torch: true }),
+    applyConstraints,
+  } as unknown as MediaStreamTrack
+  stream.getVideoTracks = () => [track]
+  return { stream, applyConstraints }
+}
+
+function mockCameraStream(stream: MediaStream): void {
+  Object.defineProperty(navigator, 'mediaDevices', {
+    value: { getUserMedia: vi.fn(async () => stream), enumerateDevices: vi.fn(async () => []) },
+    configurable: true,
+  })
+}
+
 function captureDownload(): { blob: Blob | null } {
   const captured: { blob: Blob | null } = { blob: null }
   Object.defineProperty(URL, 'createObjectURL', {
@@ -837,6 +863,71 @@ describe('Scanner', () => {
       delete nav['canShare']
       delete nav['share']
     }
+  })
+
+  it('shows the flashlight toggle when the track supports torch', async () => {
+    const { stream } = torchStream()
+    mockCameraStream(stream)
+    render(<Scanner />)
+    openOverflow()
+    const toggle = await screen.findByRole('switch', { name: 'Flashlight' })
+    expect(toggle).not.toBeChecked()
+  })
+
+  it('toggles torch via applyConstraints', async () => {
+    const { stream, applyConstraints } = torchStream()
+    mockCameraStream(stream)
+    render(<Scanner />)
+    openOverflow()
+    const toggle = await screen.findByRole('switch', { name: 'Flashlight' })
+    fireEvent.click(toggle)
+    await waitFor(() =>
+      expect(applyConstraints).toHaveBeenCalledWith({ advanced: [{ torch: true }] }),
+    )
+    expect(toggle).toBeChecked()
+    fireEvent.click(toggle)
+    await waitFor(() =>
+      expect(applyConstraints).toHaveBeenCalledWith({ advanced: [{ torch: false }] }),
+    )
+    expect(toggle).not.toBeChecked()
+  })
+
+  it('hides the flashlight toggle without torch support', async () => {
+    mockCamera(true)
+    render(<Scanner />)
+    openOverflow()
+    expect(await screen.findByText('LIVE')).toBeInTheDocument()
+    expect(screen.queryByRole('switch', { name: 'Flashlight' })).not.toBeInTheDocument()
+  })
+
+  it('turns torch off when the new camera lacks it', async () => {
+    const { stream } = torchStream()
+    mockCameraStream(stream)
+    render(<Scanner />)
+    openOverflow()
+    const toggle = await screen.findByRole('switch', { name: 'Flashlight' })
+    fireEvent.click(toggle)
+    await waitFor(() => expect(toggle).toBeChecked())
+    mockCamera(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Switch camera' }))
+    await waitFor(() => {
+      expect(screen.queryByRole('switch', { name: 'Flashlight' })).not.toBeInTheDocument()
+    })
+  })
+
+  it('stays off when the torch constraint is rejected', async () => {
+    const { stream } = torchStream(async () => {
+      throw new Error('denied')
+    })
+    mockCameraStream(stream)
+    render(<Scanner />)
+    openOverflow()
+    const toggle = await screen.findByRole('switch', { name: 'Flashlight' })
+    fireEvent.click(toggle)
+    await waitFor(() => {
+      expect(getLogs().some((e) => e.message.includes('flashlight'))).toBe(true)
+    })
+    expect(toggle).not.toBeChecked()
   })
 
   it('unlocks tracking when switching cameras', async () => {

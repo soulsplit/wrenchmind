@@ -19,6 +19,10 @@ interface HeaderProps {
   onSwitchCamera: () => void
   onClearView: () => void
   onExportReport: () => void
+  torchOn: boolean
+  /** True when the active camera track reports torch capability. */
+  hasTorch: boolean
+  onTorchToggle: (next: boolean) => void
 }
 
 /**
@@ -40,6 +44,9 @@ export default function Header({
   onSwitchCamera,
   onClearView,
   onExportReport,
+  torchOn,
+  hasTorch,
+  onTorchToggle,
 }: HeaderProps) {
   const [overflowOpen, setOverflowOpen] = useState(false)
 
@@ -78,6 +85,7 @@ export default function Header({
           }}
         >
           <Toggle checked={voiceOn} onChange={onVoiceToggle} label="Voice mode" />
+          {hasTorch && <Toggle checked={torchOn} onChange={onTorchToggle} label="Flashlight" />}
           <QrShare />
           <LogPanel />
           {multiCamera && (

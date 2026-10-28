@@ -40,7 +40,8 @@ and enable Pages with the **GitHub Actions** source in repo settings.
 ## Features
 
 - Full-viewport camera feed with transparent AR canvas; front/back switcher
-  hides itself on single-camera devices.
+  hides itself on single-camera devices, and a flashlight toggle appears
+  when the camera track reports torch support.
 - Color-coded overlays (cyan = component, yellow = connector, red =
   fastener) with callout pills; plural queries ("all the bolts") isolate
   every instance with numbered outlines. Overlays re-segment every 2 s so

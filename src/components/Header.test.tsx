@@ -14,6 +14,9 @@ function renderHeader(overrides: Partial<Parameters<typeof Header>[0]> = {}) {
     onSwitchCamera: vi.fn(),
     onClearView: vi.fn(),
     onExportReport: vi.fn(),
+    torchOn: false,
+    hasTorch: false,
+    onTorchToggle: vi.fn(),
     ...overrides,
   }
   render(<Header {...props} />)
@@ -97,6 +100,27 @@ describe('Header', () => {
     expect(screen.getByRole('button', { name: 'Switch camera' })).toBeInTheDocument()
     expect(screen.getByText('Clear AR View')).toBeInTheDocument()
     expect(screen.getByText('Export Report')).toBeInTheDocument()
+  })
+
+  it('shows the flashlight toggle only with torch support', () => {
+    renderHeader()
+    openOverflow()
+    expect(screen.queryByRole('switch', { name: 'Flashlight' })).not.toBeInTheDocument()
+  })
+
+  it('wires the flashlight toggle to its callback', () => {
+    const props = renderHeader({ hasTorch: true })
+    openOverflow()
+    const toggle = screen.getByRole('switch', { name: 'Flashlight' })
+    expect(toggle).not.toBeChecked()
+    fireEvent.click(toggle)
+    expect(props.onTorchToggle).toHaveBeenCalledWith(true)
+  })
+
+  it('reflects the torch state', () => {
+    renderHeader({ hasTorch: true, torchOn: true })
+    openOverflow()
+    expect(screen.getByRole('switch', { name: 'Flashlight' })).toBeChecked()
   })
 
   it('wires the overflow controls to their callbacks', () => {

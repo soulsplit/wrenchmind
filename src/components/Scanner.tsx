@@ -36,6 +36,18 @@ interface RefreshTarget {
   points: { x: number; y: number }[]
 }
 
+/**
+ * Torch capability/constraint shapes. Absent from this TS DOM lib but
+ * present at runtime on supporting devices (Chrome/Android).
+ */
+interface TorchCapabilities extends MediaTrackCapabilities {
+  torch?: unknown
+}
+
+interface TorchConstraintSet extends MediaTrackConstraintSet {
+  torch?: boolean
+}
+
 /** Re-segment cadence while an overlay tracks a moving subject. */
 const REFRESH_INTERVAL_MS = 2000
 
@@ -148,6 +160,8 @@ export default function Scanner() {
   const refreshRef = useRef<number | null>(null)
   const [facing, setFacing] = useState<'environment' | 'user'>('environment')
   const [multiCamera, setMultiCamera] = useState(true)
+  const [torchOn, setTorchOn] = useState(false)
+  const [hasTorch, setHasTorch] = useState(false)
   const [cameraLive, setCameraLive] = useState(false)
   const [actualFacing, setActualFacing] = useState<'environment' | 'user' | 'unknown'>('unknown')
   const [findings, setFindings] = useState<string[]>([])
@@ -290,8 +304,13 @@ export default function Scanner() {
       if (!cancelled) {
         // Ground truth for the badge: the requested facing may have fallen
         // back (desktop webcams report no facingMode at all).
-        const mode = stream.getVideoTracks()[0]?.getSettings?.().facingMode
+        const track = stream.getVideoTracks()[0]
+        const mode = track?.getSettings?.().facingMode
         setActualFacing(mode === 'environment' || mode === 'user' ? mode : 'unknown')
+        // Torch is per-track: recompute on every (re)connect and start dark.
+        const caps = track?.getCapabilities?.() as TorchCapabilities | undefined
+        setHasTorch(caps?.torch === true)
+        setTorchOn(false)
       }
       try {
         const devices = await navigator.mediaDevices.enumerateDevices()
@@ -314,6 +333,8 @@ export default function Scanner() {
       cancelled = true
       setCameraLive(false)
       setActualFacing('unknown')
+      setTorchOn(false)
+      setHasTorch(false)
       stream?.getTracks().forEach((t) => t.stop())
     }
   }, [facing])
@@ -679,6 +700,21 @@ export default function Scanner() {
     setFacing((was) => (was === 'environment' ? 'user' : 'environment'))
   }
 
+  const toggleTorch = async (next: boolean) => {
+    const stream = videoRef.current?.srcObject as MediaStream | null
+    const track = stream?.getVideoTracks()[0]
+    if (!track?.applyConstraints) return
+    try {
+      const constraint: TorchConstraintSet = { torch: next }
+      await track.applyConstraints({ advanced: [constraint] })
+      setTorchOn(next)
+      logInfo('camera', `flashlight ${next ? 'on' : 'off'}`)
+    } catch {
+      logWarn('camera', 'flashlight switch failed')
+      setTorchOn(false)
+    }
+  }
+
   return (
     <div className="relative w-full h-dvh overflow-hidden bg-black lg:flex">
       {/* Feed pane: overlay master at every size; narrows to 2/3 on desktop. */}
@@ -728,6 +764,9 @@ export default function Scanner() {
         onSwitchCamera={flipCamera}
         onClearView={clearOverlay}
         onExportReport={exportReport}
+        torchOn={torchOn}
+        hasTorch={hasTorch}
+        onTorchToggle={(next) => void toggleTorch(next)}
       />
       {/*
         Bottom dock: error toast, HUD card, and thumb-reachable query input
