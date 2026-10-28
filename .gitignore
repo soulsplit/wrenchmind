@@ -16,6 +16,9 @@ coverage
 .env
 .env.*
 
+# Local working notes, prompts, and generated assets (not shipped)
+context/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
