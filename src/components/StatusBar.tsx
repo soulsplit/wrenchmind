@@ -11,11 +11,14 @@ const LABELS: Record<Status, string> = {
   error: '[ ⚠ ERROR ]',
 }
 
+/**
+ * Inline status pill. Positioning is owned by the parent (the Header badge
+ * row); this component only renders the label with its live-region semantics.
+ */
 export default function StatusBar({ status }: StatusBarProps) {
   return (
     <div
-      className="absolute top-4 left-1/2 -translate-x-1/2 bg-black/70 text-white px-4 py-2 rounded-full text-sm font-mono whitespace-nowrap"
-      style={{ marginTop: 'env(safe-area-inset-top)' }}
+      className="bg-black/70 text-white px-3 py-1 rounded-full text-xs font-mono whitespace-nowrap"
       role="status"
       aria-live="polite"
     >

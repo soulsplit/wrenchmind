@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { Callout, MaskRecord, OverlayKind, Status } from '../types'
+import type { Callout, GuidanceResult, MaskRecord, OverlayKind, Status } from '../types'
 import {
   captureFrameBurst,
   captureVideoFrame,
@@ -9,14 +9,13 @@ import {
 } from '../services/metaApi'
 import type { SamPointPrompt } from '../services/metaApi'
 import { parseSamStream } from '../services/samParser'
+import { fetchGuidance } from '../services/guidanceApi'
 import { VoiceAssistant } from '../services/voiceAssistant'
 import { permissionBlocker, secureContextBlocker } from '../services/mediaSupport'
 import { logDebug, logError, logInfo, logWarn } from '../services/logger'
-import StatusBar from './StatusBar'
-import Toggle from './Toggle'
 import QueryBar from './QueryBar'
-import LogPanel from './LogPanel'
-import QrShare from './QrShare'
+import Header from './Header'
+import HudCard from './HudCard'
 
 interface Overlay {
   rec: MaskRecord
@@ -96,6 +95,10 @@ export default function Scanner() {
   const refreshRef = useRef<number | null>(null)
   const [facing, setFacing] = useState<'environment' | 'user'>('environment')
   const [multiCamera, setMultiCamera] = useState(true)
+  const [guidance, setGuidance] = useState<GuidanceResult | null>(null)
+  const [guidancePending, setGuidancePending] = useState(false)
+  const [stepIndex, setStepIndex] = useState(0)
+  const guidanceReqRef = useRef(0)
 
   const draw = useCallback((force = false) => {
     const canvas = canvasRef.current
@@ -267,6 +270,31 @@ export default function Scanner() {
     [tickRefresh],
   )
 
+  /**
+   * Fetch repair guidance alongside segmentation. Fire-and-forget on purpose:
+   * guidance must never stall or fail the AR phrase pipeline, and the request
+   * id drops stale responses when a newer scan supersedes them.
+   */
+  const requestGuidance = useCallback((label: string, phrase: string, context: string) => {
+    guidanceReqRef.current += 1
+    const reqId = guidanceReqRef.current
+    setGuidancePending(true)
+    void fetchGuidance(label, phrase, context).then(
+      (result) => {
+        if (guidanceReqRef.current !== reqId) return
+        setGuidance(result)
+        setStepIndex(0)
+        logInfo('guidance', `"${result.title}" (${result.steps.length} steps)`)
+      },
+      (e: unknown) => {
+        if (guidanceReqRef.current !== reqId) return
+        logWarn('guidance', `guidance unavailable: ${e instanceof Error ? e.message : String(e)}`)
+      },
+    ).finally(() => {
+      if (guidanceReqRef.current === reqId) setGuidancePending(false)
+    })
+  }, [])
+
   const handlePhrase = useCallback(async (phrase: string) => {
     // Serialize analyses; the latest phrase spoken mid-flight runs next.
     if (busyRef.current) {
@@ -334,6 +362,7 @@ export default function Scanner() {
           })
           draw()
           armRefresh(result.target_label, result.approx_x, result.approx_y)
+          requestGuidance(result.target_label, phrase, ctxStr)
         }
         // Speak only in speech_and_visual mode with a non-null response.
         // visual_only and null responses stay silent (visual-only).
@@ -352,7 +381,7 @@ export default function Scanner() {
       pendingRef.current = null
       if (next) void handlePhrase(next)
     }
-  }, [draw, armRefresh])
+  }, [draw, armRefresh, requestGuidance])
 
   // Voice assistant lifecycle.
   useEffect(() => {
@@ -393,9 +422,18 @@ export default function Scanner() {
     assistantRef.current?.clearMemory()
     clearRefresh()
     setCallout(null)
+    // Invalidate any in-flight guidance fetch and drop the HUD card.
+    guidanceReqRef.current += 1
+    setGuidance(null)
+    setGuidancePending(false)
+    setStepIndex(0)
     draw(true)
   }
 
+  const changeStep = (index: number) => {
+    const count = guidance?.steps.length ?? 0
+    setStepIndex(count > 0 ? Math.min(Math.max(0, index), count - 1) : 0)
+  }
   const clearOverlay = () => {
     resetOverlays()
     logInfo('view', 'AR view cleared')
@@ -409,7 +447,7 @@ export default function Scanner() {
   }
 
   return (
-    <div className="relative w-screen h-screen overflow-hidden bg-black">
+    <div className="relative w-full h-dvh overflow-hidden bg-black">
       <video
         ref={videoRef}
         autoPlay
@@ -437,57 +475,43 @@ export default function Scanner() {
           {callout.label}
         </div>
       )}
-      <StatusBar status={status} />
+      <Header
+        status={status}
+        voiceOn={voiceOn}
+        onVoiceToggle={(next) => void handleToggle(next)}
+        facing={facing}
+        multiCamera={multiCamera}
+        onSwitchCamera={flipCamera}
+        onClearView={clearOverlay}
+      />
+      {/*
+        Bottom dock: error toast, HUD card, and thumb-reachable query input
+        stack vertically so nothing can collide at 360px width.
+      */}
       <div
-        className="absolute top-4 left-4 flex gap-2 items-start"
-        style={{ marginTop: 'env(safe-area-inset-top)', marginLeft: 'env(safe-area-inset-left)' }}
+        className="absolute bottom-0 inset-x-0 z-10 flex flex-col gap-2"
+        style={{
+          paddingBottom: 'max(1rem, env(safe-area-inset-bottom))',
+          paddingLeft: 'max(1rem, env(safe-area-inset-left))',
+          paddingRight: 'max(1rem, env(safe-area-inset-right))',
+        }}
       >
-        <LogPanel />
-        <QrShare />
-      </div>
-      <div
-        className="absolute top-4 right-4"
-        style={{ marginTop: 'env(safe-area-inset-top)', marginRight: 'env(safe-area-inset-right)' }}
-      >
-        <Toggle checked={voiceOn} onChange={(next) => void handleToggle(next)} />
-      </div>
-      <div
-        className="absolute bottom-4 right-4 flex flex-col gap-2 items-end"
-        style={{ marginBottom: 'env(safe-area-inset-bottom)', marginRight: 'env(safe-area-inset-right)' }}
-      >
-        {multiCamera && (
-          <button
-            type="button"
-            onClick={flipCamera}
-            aria-label="Switch camera"
-            className="min-h-[48px] bg-white/90 text-black px-4 py-3 rounded-lg font-bold shadow text-base active:scale-95 transition"
-          >
-            Switch camera
-          </button>
+        {error && (
+          <div className="bg-red-600 text-white px-4 py-2 rounded-lg text-sm" role="alert">
+            {error}
+          </div>
         )}
-        <button
-          type="button"
-          onClick={clearOverlay}
-          className="min-h-[48px] bg-white/90 text-black px-4 py-3 rounded-lg font-bold shadow text-base active:scale-95 transition"
-        >
-          Clear AR View
-        </button>
-      </div>
-      <div
-        className="absolute bottom-4 left-1/2 -translate-x-1/2"
-        style={{ marginBottom: 'env(safe-area-inset-bottom)' }}
-      >
+        {(guidancePending || guidance) && (
+          <HudCard
+            guidance={guidance}
+            pending={guidancePending}
+            stepIndex={stepIndex}
+            onStepChange={changeStep}
+            onScanAnother={clearOverlay}
+          />
+        )}
         <QueryBar onSubmit={(text) => void handlePhrase(text)} />
       </div>
-      {error && (
-        <div
-          className="absolute bottom-4 left-4 bg-red-600 text-white px-4 py-2 rounded-lg max-w-[70vw]"
-          style={{ marginBottom: 'env(safe-area-inset-bottom)', marginLeft: 'env(safe-area-inset-left)' }}
-          role="alert"
-        >
-          {error}
-        </div>
-      )}
     </div>
   )
 }

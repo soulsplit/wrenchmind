@@ -8,9 +8,11 @@ import {
   segmentImage,
 } from '../services/metaApi'
 import { parseSamStream } from '../services/samParser'
+import { fetchGuidance } from '../services/guidanceApi'
 import type { SamStreamEvent } from '../services/metaApi'
 import type { VoiceAssistantCallbacks } from '../services/voiceAssistant'
-import type { SpatialResult } from '../types'
+import type { GuidanceResult, SpatialResult } from '../types'
+import { validGuidanceFixture } from '../test/guidanceFixtures'
 import { clearLogs, getLogs } from '../services/logger'
 
 interface AssistantDouble {
@@ -40,6 +42,10 @@ vi.mock('../services/metaApi', async (importOriginal) => {
 
 vi.mock('../services/samParser', () => ({
   parseSamStream: vi.fn(async () => []),
+}))
+
+vi.mock('../services/guidanceApi', () => ({
+  fetchGuidance: vi.fn(),
 }))
 
 vi.mock('../services/voiceAssistant', () => {
@@ -90,6 +96,10 @@ function mockCamera(granted: boolean, devices: { kind: string }[] = []): Mock {
   return getUserMedia
 }
 
+function openOverflow(): void {
+  fireEvent.click(screen.getByRole('button', { name: 'More options' }))
+}
+
 beforeEach(() => {
   assistants.length = 0
   clearLogs()
@@ -98,6 +108,8 @@ beforeEach(() => {
   vi.mocked(captureVideoFrame).mockReset().mockReturnValue('data:image/jpeg;base64,AAA')
   vi.mocked(reasonSpatial).mockReset()
   vi.mocked(segmentImage).mockReset().mockReturnValue(emptyEvents())
+  // Default mirrors the stub: guidance unavailable, AR pipeline unaffected.
+  vi.mocked(fetchGuidance).mockReset().mockRejectedValue(new Error('not implemented'))
 })
 
 afterEach(() => {
@@ -108,8 +120,13 @@ describe('Scanner', () => {
   it('renders the initial viewfinder UI', () => {
     mockCamera(true)
     render(<Scanner />)
+    expect(screen.getByText('WRENCHMIND')).toBeInTheDocument()
     expect(screen.getByText('[ OFF ]')).toBeInTheDocument()
-    expect(screen.getByRole('switch', { name: 'Enable Voice Assistant' })).toBeInTheDocument()
+    expect(screen.getByRole('switch', { name: 'Voice' })).toBeInTheDocument()
+    expect(screen.getByText('LIVE')).toBeInTheDocument()
+    expect(screen.getByText('REAR CAMERA')).toBeInTheDocument()
+    expect(screen.getByLabelText('Query text')).toBeInTheDocument()
+    openOverflow()
     expect(screen.getByRole('button', { name: 'Switch camera' })).toBeInTheDocument()
     expect(screen.getByText('Clear AR View')).toBeInTheDocument()
   })
@@ -117,6 +134,7 @@ describe('Scanner', () => {
   it('switches between back and front cameras', async () => {
     const getUserMedia = mockCamera(true)
     render(<Scanner />)
+    openOverflow()
     await waitFor(() =>
       expect(getUserMedia).toHaveBeenCalledWith({ video: { facingMode: 'environment' } }),
     )
@@ -144,6 +162,7 @@ describe('Scanner', () => {
       assistants[0].callbacks.onPhrase('show screws')
     })
     await screen.findByText('Screw')
+    openOverflow()
     fireEvent.click(screen.getByRole('button', { name: 'Switch camera' }))
     expect(screen.queryByText('Screw')).not.toBeInTheDocument()
     expect(assistants[0].clearMemory).toHaveBeenCalledTimes(1)
@@ -152,6 +171,7 @@ describe('Scanner', () => {
   it('hides the switcher when only one camera exists', async () => {
     mockCamera(true, [{ kind: 'videoinput' }])
     render(<Scanner />)
+    openOverflow()
     expect(screen.getByRole('button', { name: 'Switch camera' })).toBeInTheDocument()
     await waitFor(() => {
       expect(screen.queryByRole('button', { name: 'Switch camera' })).not.toBeInTheDocument()
@@ -161,10 +181,24 @@ describe('Scanner', () => {
   it('keeps the switcher with multiple cameras', async () => {
     mockCamera(true, [{ kind: 'videoinput' }, { kind: 'videoinput' }, { kind: 'audioinput' }])
     render(<Scanner />)
+    openOverflow()
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 50))
     })
     expect(screen.getByRole('button', { name: 'Switch camera' })).toBeInTheDocument()
+  })
+
+  it('reflects the camera facing in the header badge', async () => {
+    const getUserMedia = mockCamera(true)
+    render(<Scanner />)
+    expect(screen.getByText('REAR CAMERA')).toBeInTheDocument()
+    openOverflow()
+    await waitFor(() =>
+      expect(getUserMedia).toHaveBeenCalledWith({ video: { facingMode: 'environment' } }),
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Switch camera' }))
+    expect(await screen.findByText('FRONT CAMERA')).toBeInTheDocument()
+    expect(screen.queryByText('REAR CAMERA')).not.toBeInTheDocument()
   })
 
   it('surfaces camera denial as a visible error', async () => {
@@ -240,6 +274,7 @@ describe('Scanner', () => {
       assistants[0].callbacks.onPhrase('show screws')
     })
     await screen.findByText('Screw')
+    openOverflow()
     fireEvent.click(screen.getByText('Clear AR View'))
     expect(screen.queryByText('Screw')).not.toBeInTheDocument()
     expect(assistants[0].clearMemory).toHaveBeenCalledTimes(1)
@@ -412,6 +447,7 @@ describe('Scanner', () => {
         await vi.advanceTimersByTimeAsync(2100)
       })
       expect(segmentImage).toHaveBeenCalledTimes(2)
+      openOverflow()
       fireEvent.click(screen.getByText('Clear AR View'))
       await act(async () => {
         await vi.advanceTimersByTimeAsync(10000)
@@ -728,6 +764,7 @@ describe('Scanner', () => {
       configurable: true,
     })
     render(<Scanner />)
+    openOverflow()
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 50))
     })
@@ -859,5 +896,103 @@ describe('Scanner', () => {
       assistants[0].callbacks.onPhrase('show screws')
     })
     expect(await screen.findByText('[ ⚠ ERROR ]')).toBeInTheDocument()
+  })
+
+  it('fetches guidance alongside segmentation and renders the HUD card', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Blend door',
+      approx_x: 40,
+      approx_y: 60,
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    vi.mocked(fetchGuidance).mockResolvedValue(validGuidanceFixture)
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show me the blend door')
+    })
+    expect(await screen.findByText('MID-DRIVE DRIVE BELT')).toBeInTheDocument()
+    expect(fetchGuidance).toHaveBeenCalledWith('Blend door', 'show me the blend door', '')
+    expect(screen.getByText('Step 1 of 3')).toBeInTheDocument()
+    expect(screen.getByText('Warnings')).toBeInTheDocument()
+    expect(screen.getByText('Verify all specs against the manual.')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Next Step' }))
+    expect(screen.getByText('Release belt tension')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }))
+    expect(screen.getByText('Remove the belt cover')).toBeInTheDocument()
+  })
+
+  it('shows a guidance skeleton while the fetch is pending', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Screw',
+      approx_x: 10,
+      approx_y: 10,
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    let release!: (value: GuidanceResult) => void
+    vi.mocked(fetchGuidance).mockImplementationOnce(
+      () =>
+        new Promise<GuidanceResult>((resolve) => {
+          release = resolve
+        }),
+    )
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show screws')
+    })
+    expect(await screen.findByRole('status', { name: 'Loading guidance' })).toBeInTheDocument()
+    await act(async () => {
+      release(validGuidanceFixture)
+    })
+    expect(await screen.findByText('MID-DRIVE DRIVE BELT')).toBeInTheDocument()
+  })
+
+  it('keeps the AR pipeline when guidance fetch fails', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Screw',
+      approx_x: 10,
+      approx_y: 10,
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show screws')
+    })
+    expect(await screen.findByText('Screw')).toBeInTheDocument()
+    expect(screen.queryByText('MID-DRIVE DRIVE BELT')).not.toBeInTheDocument()
+    await waitFor(() => {
+      expect(
+        screen.queryByRole('status', { name: 'Loading guidance' }),
+      ).not.toBeInTheDocument()
+    })
+    expect(
+      getLogs().some((e) => e.level === 'warn' && e.message.includes('guidance unavailable')),
+    ).toBe(true)
+  })
+
+  it('clears guidance and overlays on Scan Another Part', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Screw',
+      approx_x: 10,
+      approx_y: 10,
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    vi.mocked(fetchGuidance).mockResolvedValue(validGuidanceFixture)
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show screws')
+    })
+    expect(await screen.findByText('MID-DRIVE DRIVE BELT')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Scan Another Part' }))
+    expect(screen.queryByText('MID-DRIVE DRIVE BELT')).not.toBeInTheDocument()
+    expect(screen.queryByText('Screw')).not.toBeInTheDocument()
+    expect(assistants[0].clearMemory).toHaveBeenCalledTimes(1)
   })
 })
