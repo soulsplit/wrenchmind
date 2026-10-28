@@ -7,9 +7,12 @@ import LogPanel from './LogPanel'
 
 interface HeaderProps {
   status: Status
+  /** True while a camera stream is attached and playing; badge dims otherwise. */
+  live: boolean
   voiceOn: boolean
   onVoiceToggle: (next: boolean) => void
-  facing: 'environment' | 'user'
+  /** Actual facing from the stream's track settings; 'unknown' (desktop) renders CAMERA. */
+  facing: 'environment' | 'user' | 'unknown'
   multiCamera: boolean
   onSwitchCamera: () => void
   onClearView: () => void
@@ -25,6 +28,7 @@ interface HeaderProps {
  */
 export default function Header({
   status,
+  live,
   voiceOn,
   onVoiceToggle,
   facing,
@@ -97,13 +101,26 @@ export default function Header({
           paddingRight: 'max(1rem, env(safe-area-inset-right))',
         }}
       >
-        <span className="inline-flex items-center gap-1.5 rounded-full bg-black/70 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-white">
-          <span className="inline-block h-1.5 w-1.5 rounded-full bg-red-500" aria-hidden="true" />
-          LIVE
+        <span
+          className={`inline-flex items-center gap-1.5 rounded-full bg-black/70 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-white ${live ? '' : 'opacity-60'}`}
+          role="status"
+          aria-label={live ? 'Camera live' : 'Camera off air'}
+        >
+          <span
+            className={`inline-block h-1.5 w-1.5 rounded-full ${live ? 'bg-red-500' : 'bg-white/30'}`}
+            aria-hidden="true"
+          />
+          {live ? 'LIVE' : 'NO FEED'}
         </span>
-        <span className="inline-flex items-center rounded-full bg-black/70 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-white">
-          {facing === 'environment' ? 'REAR CAMERA' : 'FRONT CAMERA'}
-        </span>
+        {live && (
+          <span className="inline-flex items-center rounded-full bg-black/70 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-white">
+            {facing === 'environment'
+              ? 'REAR CAMERA'
+              : facing === 'user'
+                ? 'FRONT CAMERA'
+                : 'CAMERA'}
+          </span>
+        )}
         <StatusBar status={status} />
       </div>
     </header>

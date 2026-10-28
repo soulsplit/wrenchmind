@@ -39,7 +39,9 @@ afterEach(() => {
 describe('secureContextBlocker', () => {
   it('reports insecure contexts', () => {
     Object.defineProperty(window, 'isSecureContext', { value: false, configurable: true })
-    expect(secureContextBlocker('Camera')).toContain('HTTPS')
+    const message = secureContextBlocker('Camera') ?? ''
+    expect(message).toContain('HTTPS')
+    expect(message).toContain('localhost')
   })
 
   it('reports missing media devices', () => {

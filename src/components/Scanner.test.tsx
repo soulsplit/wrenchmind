@@ -80,6 +80,12 @@ const FAKE_STREAM: MediaStream = (() => {
   if (typeof stream.getTracks !== 'function') {
     stream.getTracks = () => []
   }
+  // Phone-like default: the track reports a rear facing mode.
+  const track = {
+    stop: vi.fn(),
+    getSettings: () => ({ facingMode: 'environment' }),
+  } as unknown as MediaStreamTrack
+  stream.getVideoTracks = () => [track]
   return stream
 })()
 
@@ -117,13 +123,13 @@ afterEach(() => {
 })
 
 describe('Scanner', () => {
-  it('renders the initial viewfinder UI', () => {
+  it('renders the initial viewfinder UI', async () => {
     mockCamera(true)
     render(<Scanner />)
     expect(screen.getByText('WRENCHMIND')).toBeInTheDocument()
     expect(screen.getByText('[ OFF ]')).toBeInTheDocument()
     expect(screen.getByRole('switch', { name: 'Voice' })).toBeInTheDocument()
-    expect(screen.getByText('LIVE')).toBeInTheDocument()
+    expect(await screen.findByText('LIVE')).toBeInTheDocument()
     expect(screen.getByText('REAR CAMERA')).toBeInTheDocument()
     expect(screen.getByLabelText('Query text')).toBeInTheDocument()
     openOverflow()
@@ -189,9 +195,29 @@ describe('Scanner', () => {
   })
 
   it('reflects the camera facing in the header badge', async () => {
-    const getUserMedia = mockCamera(true)
+    // Phone-like: each opened track reports the facing that was requested.
+    const streamFor = (facingMode: string): MediaStream => {
+      const stream = new MediaStream()
+      if (typeof stream.getTracks !== 'function') {
+        stream.getTracks = () => []
+      }
+      const track = {
+        stop: vi.fn(),
+        getSettings: () => ({ facingMode }),
+      } as unknown as MediaStreamTrack
+      stream.getVideoTracks = () => [track]
+      return stream
+    }
+    const getUserMedia = vi.fn(async (constraints: MediaStreamConstraints) => {
+      const mode = (constraints.video as MediaTrackConstraints | undefined)?.facingMode
+      return streamFor(typeof mode === 'string' ? mode : 'environment')
+    })
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: { getUserMedia, enumerateDevices: vi.fn(async () => []) },
+      configurable: true,
+    })
     render(<Scanner />)
-    expect(screen.getByText('REAR CAMERA')).toBeInTheDocument()
+    expect(await screen.findByText('REAR CAMERA')).toBeInTheDocument()
     openOverflow()
     await waitFor(() =>
       expect(getUserMedia).toHaveBeenCalledWith({ video: { facingMode: 'environment' } }),
@@ -205,6 +231,32 @@ describe('Scanner', () => {
     mockCamera(false)
     render(<Scanner />)
     expect(await screen.findByRole('alert')).toHaveTextContent('Camera access denied')
+  })
+
+  it('dims the LIVE badge when the camera never starts', async () => {
+    mockCamera(false)
+    render(<Scanner />)
+    expect(await screen.findByText('NO FEED')).toBeInTheDocument()
+    expect(screen.queryByText('LIVE')).not.toBeInTheDocument()
+  })
+
+  it('labels a desktop-style camera with no facing mode as CAMERA', async () => {
+    const track = { stop: vi.fn(), getSettings: () => ({}) } as unknown as MediaStreamTrack
+    const stream = new MediaStream()
+    if (typeof stream.getTracks !== 'function') {
+      stream.getTracks = () => []
+    }
+    stream.getVideoTracks = () => [track]
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {
+        getUserMedia: vi.fn(async () => stream),
+        enumerateDevices: vi.fn(async () => []),
+      },
+      configurable: true,
+    })
+    render(<Scanner />)
+    expect(await screen.findByText('CAMERA')).toBeInTheDocument()
+    expect(screen.queryByText('REAR CAMERA')).not.toBeInTheDocument()
   })
 
   it('toggles voice listening through the assistant', async () => {

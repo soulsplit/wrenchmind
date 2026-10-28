@@ -117,6 +117,8 @@ export default function Scanner() {
   const refreshRef = useRef<number | null>(null)
   const [facing, setFacing] = useState<'environment' | 'user'>('environment')
   const [multiCamera, setMultiCamera] = useState(true)
+  const [cameraLive, setCameraLive] = useState(false)
+  const [actualFacing, setActualFacing] = useState<'environment' | 'user' | 'unknown'>('unknown')
   const [guidance, setGuidance] = useState<GuidanceResult | null>(null)
   const [guidancePending, setGuidancePending] = useState(false)
   const [stepIndex, setStepIndex] = useState(0)
@@ -231,6 +233,12 @@ export default function Scanner() {
         setError(hint)
         return
       }
+      if (!cancelled) {
+        // Ground truth for the badge: the requested facing may have fallen
+        // back (desktop webcams report no facingMode at all).
+        const mode = stream.getVideoTracks()[0]?.getSettings?.().facingMode
+        setActualFacing(mode === 'environment' || mode === 'user' ? mode : 'unknown')
+      }
       try {
         const devices = await navigator.mediaDevices.enumerateDevices()
         const cameras = devices.filter((d) => d.kind === 'videoinput')
@@ -242,6 +250,7 @@ export default function Scanner() {
         videoRef.current.srcObject = stream
         try {
           await videoRef.current.play()
+          if (!cancelled) setCameraLive(true)
         } catch {
           logWarn('camera', 'video autoplay was blocked')
         }
@@ -249,6 +258,8 @@ export default function Scanner() {
     })()
     return () => {
       cancelled = true
+      setCameraLive(false)
+      setActualFacing('unknown')
       stream?.getTracks().forEach((t) => t.stop())
     }
   }, [facing])
@@ -533,9 +544,10 @@ export default function Scanner() {
       )}
       <Header
         status={status}
+        live={cameraLive}
         voiceOn={voiceOn}
         onVoiceToggle={(next) => void handleToggle(next)}
-        facing={facing}
+        facing={actualFacing}
         multiCamera={multiCamera}
         onSwitchCamera={flipCamera}
         onClearView={clearOverlay}

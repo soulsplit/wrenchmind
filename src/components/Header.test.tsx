@@ -5,6 +5,7 @@ import Header from './Header'
 function renderHeader(overrides: Partial<Parameters<typeof Header>[0]> = {}) {
   const props = {
     status: 'off' as const,
+    live: true,
     voiceOn: false,
     onVoiceToggle: vi.fn(),
     facing: 'environment' as const,
@@ -30,6 +31,20 @@ describe('Header', () => {
     expect(screen.getByRole('button', { name: 'QR' })).toBeInTheDocument()
     expect(screen.getByText('LIVE')).toBeInTheDocument()
     expect(screen.getByText('REAR CAMERA')).toBeInTheDocument()
+  })
+
+  it('dims the LIVE badge to NO FEED when the camera is off air', () => {
+    renderHeader({ live: false })
+    expect(screen.getByText('NO FEED')).toBeInTheDocument()
+    expect(screen.queryByText('LIVE')).not.toBeInTheDocument()
+    expect(screen.getByRole('status', { name: 'Camera off air' })).toHaveClass('opacity-60')
+    expect(screen.queryByText('REAR CAMERA')).not.toBeInTheDocument()
+  })
+
+  it('labels a camera with unknown facing as CAMERA', () => {
+    renderHeader({ facing: 'unknown' })
+    expect(screen.getByText('CAMERA')).toBeInTheDocument()
+    expect(screen.queryByText('REAR CAMERA')).not.toBeInTheDocument()
   })
 
   it('shows the front-camera badge when facing the user', () => {

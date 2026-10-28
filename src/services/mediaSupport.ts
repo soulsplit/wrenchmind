@@ -10,8 +10,8 @@ export function secureContextBlocker(kind: 'Camera' | 'Microphone'): string | nu
   // false means insecure (non-browser runtimes leave it undefined).
   if (window.isSecureContext === false) {
     return (
-      `${kind} requires a secure connection (HTTPS). ` +
-      'Open this app over HTTPS to grant access.'
+      `${kind} needs HTTPS or localhost — browsers block it on plain HTTP. ` +
+      'On this device open the localhost URL; on your phone open the HTTPS tunnel URL.'
     )
   }
   if (typeof navigator.mediaDevices?.getUserMedia !== 'function') {
