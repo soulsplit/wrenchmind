@@ -55,6 +55,21 @@ describe('LogPanel', () => {
     expect(copied).toContain('[voice] listening')
   })
 
+  it('tolerates clipboard failures', () => {
+    const writeText = vi.fn(async () => {
+      throw new Error('denied')
+    })
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    })
+    render(<LogPanel />)
+    fireEvent.click(screen.getByText('Logs'))
+    fireEvent.click(screen.getByText('Copy'))
+    expect(writeText).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('log')).toBeInTheDocument()
+  })
+
   it('downloads the log as a .log file', () => {
     logInfo('t', 'x')
     let blobType = ''

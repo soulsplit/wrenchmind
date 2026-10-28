@@ -158,6 +158,15 @@ describe('reasonSpatial', () => {
 
     fetchMock.mockResolvedValueOnce(errorResponse(400, 'x'.repeat(600)))
     await expect(reasonSpatial('img', 'p', '')).rejects.toThrow(/^Muse Spark 400: x{500}$/)
+
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      text: async () => {
+        throw new Error('no body')
+      },
+    } as unknown as Response)
+    await expect(reasonSpatial('img', 'p', '')).rejects.toThrow('Muse Spark 500')
   })
 
   it('includes the server error body in SAM failures', async () => {
@@ -194,6 +203,7 @@ describe('segmentImage', () => {
       sseResponse([
         'data: {"type":"response.output_text.delta","delta":"<0f>"}\n',
         'data: {"type":"response.completed"}\n',
+        'data: {"no-type":true}\n',
         'data: not-json\n',
         ': comment\n',
         'data: [DONE]\n',
@@ -294,6 +304,8 @@ describe('hasApiKey', () => {
     expect(hasApiKey()).toBe(true)
     vi.stubEnv('VITE_META_MODEL_API_KEY', '')
     expect(hasApiKey()).toBe(false)
+    vi.stubEnv('VITE_META_MODEL_API_KEY', undefined)
+    expect(hasApiKey()).toBe(false)
   })
 })
 
@@ -338,5 +350,24 @@ describe('captureVideoFrame', () => {
     expect(
       captureVideoFrame({ videoWidth: 0, videoHeight: 480 } as HTMLVideoElement),
     ).toBe('')
+    expect(
+      captureVideoFrame({ videoWidth: 640, videoHeight: 0 } as HTMLVideoElement),
+    ).toBe('')
+  })
+
+  it('captures a frame as a JPEG data URL', () => {
+    const drawImage = vi.fn()
+    const ctxSpy = vi
+      .spyOn(window.HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue({ drawImage } as unknown as CanvasRenderingContext2D)
+    try {
+      const video = document.createElement('video')
+      Object.defineProperty(video, 'videoWidth', { value: 640, configurable: true })
+      Object.defineProperty(video, 'videoHeight', { value: 480, configurable: true })
+      expect(captureVideoFrame(video)).toBe('data:image/jpeg;base64,')
+      expect(drawImage).toHaveBeenCalledTimes(1)
+    } finally {
+      ctxSpy.mockRestore()
+    }
   })
 })

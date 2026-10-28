@@ -49,3 +49,88 @@ export interface Callout {
   y: number
   kind: OverlayKind
 }
+
+/**
+ * One numbered repair step.
+ * D2 trust: model-generated, never authoritative. `warning` is a per-step
+ * caution; it does not replace the mandatory top-level `warnings` slot.
+ */
+export interface GuidanceStep {
+  /** Short step heading. */
+  title: string
+  /** What to do, in plain instructional prose. */
+  detail: string
+  /** Optional step-local caution (e.g. "hot surface"). */
+  warning?: string
+}
+
+/**
+ * One labeled spec value (torque, capacity, gap, ...).
+ * D2 trust: ALWAYS rendered with the persistent "verify against manual"
+ * treatment. The pipeline must emit `specs: []` plus a `warnings` entry
+ * when a spec is unknown rather than inventing a value. No numeric
+ * confidence field exists anywhere on this contract by design —
+ * a model-stated percentage would be fabricated authority.
+ */
+export interface GuidanceSpec {
+  label: string
+  value: string
+}
+
+/**
+ * One grounding citation.
+ * D2 trust: the visible evidence line that replaces numeric confidence.
+ * URLs come from `url_citation` annotations on the grounding call (D10:
+ * the model web-searches, reads, and parses the best-fit repair/user
+ * manual; see `manualTitle`). Render as links; never fabricate.
+ */
+export interface GuidanceSource {
+  title: string
+  url: string
+}
+
+/**
+ * Shared repair-guidance data model (grill D1/D2/D8/D10).
+ * Consumed by the HUD cards now and by voice output later.
+ *
+ * D2 trust posture: model-generated content is never presented as
+ * authoritative. Safety-critical numbers always carry a persistent
+ * "verify against manual" treatment, the `warnings` slot is mandatory,
+ * and validation constrains formats and refuses to invent unknown specs.
+ * POC flaw tolerance accepted; fabricated authority is not.
+ * There is intentionally NO numeric confidence field.
+ */
+export interface GuidanceResult {
+  /** Part or job title, e.g. "MID-DRIVE DRIVE BELT". */
+  title: string
+  /** Ordered repair steps. Must be non-empty; drop malformed entries. */
+  steps: GuidanceStep[]
+  /**
+   * Spec values. Every entry is rendered with verify treatment (see
+   * `GuidanceSpec`). Empty array when no spec is known — never invented.
+   */
+  specs: GuidanceSpec[]
+  /** Tool list, e.g. ["T20 Torx", "Trim tool"]. */
+  tools: string[]
+  /**
+   * MANDATORY slot. Must render even when empty (show a generic
+   * "verify against manual" caution rather than omitting the slot).
+   */
+  warnings: string[]
+  /**
+   * Citation URLs grounding this guidance (D10 manual retrieval).
+   * Rendered as the sources line; empty when grounding failed.
+   */
+  sources: GuidanceSource[]
+  /**
+   * Title of the manual the model read and parsed as grounding source,
+   * or null when no manual was found/parsed (D10). Null strengthens —
+   * never weakens — the verify treatment.
+   */
+  manualTitle: string | null
+  /**
+   * One plain-text paragraph, no markdown. Deferred voice-narration seam:
+   * later voice output reads this same field. Nothing speaks it yet.
+   */
+  speechSummary: string
+}

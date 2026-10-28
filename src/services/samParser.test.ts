@@ -1,5 +1,15 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { decodeMaskToRaster, parseImageStream } from '@meta-sam/parser'
 import { parseSamStream } from './samParser'
+
+vi.mock('@meta-sam/parser', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@meta-sam/parser')>()
+  return {
+    ...actual,
+    decodeMaskToRaster: vi.fn(actual.decodeMaskToRaster),
+    parseImageStream: vi.fn(actual.parseImageStream),
+  }
+})
 
 interface TestEvent {
   type: string
@@ -110,6 +120,29 @@ describe('parseSamStream', () => {
     expect(recs).toHaveLength(1)
     expect(recs[0].box).toMatchObject({ x1: 0, y1: 0, x2: 1, y2: 0 })
     expect(Array.from(recs[0].raster)).toEqual(MASKS.full2x1.raster)
+  })
+
+  it('skips masks that fail to decode', async () => {
+    vi.mocked(decodeMaskToRaster).mockImplementationOnce(() => {
+      throw new Error('corrupt payload')
+    })
+    const line = `<0f>${boxTag(0, 0, 0, 2, 1)}${maskTag(MASKS.oneZero2x1.data)}`
+    await expect(parseSamStream(events(line))).resolves.toEqual([])
+  })
+
+  it('skips masks without a matching box', async () => {
+    vi.mocked(parseImageStream).mockReturnValueOnce({
+      finalResult: Promise.resolve({
+        records: [
+          {
+            kind: 'mask',
+            objectId: 'orphan',
+            mask: { width: 1, height: 1, data: MASKS.oneZero2x1.data },
+          },
+        ],
+      }),
+    } as unknown as ReturnType<typeof parseImageStream>)
+    await expect(parseSamStream(events('<0f>ignored'))).resolves.toEqual([])
   })
 
   it('skips undecodable masks without dropping good records', async () => {

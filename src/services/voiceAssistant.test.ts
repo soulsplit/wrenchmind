@@ -8,6 +8,7 @@ interface FakeResultEvent {
 
 class FakeRecognition {
   static instances: FakeRecognition[] = []
+  static throwOnStart = false
   continuous = false
   interimResults = true
   lang = ''
@@ -21,11 +22,25 @@ class FakeRecognition {
   }
 
   start(): void {
+    if (FakeRecognition.throwOnStart) throw new Error('start blocked')
     this.started = true
   }
 
   stop(): void {
     this.started = false
+  }
+}
+
+class FakeAudioContext {
+  static instances: FakeAudioContext[] = []
+  state: 'suspended' | 'running' = 'suspended'
+  resume = vi.fn(async (): Promise<void> => {
+    this.state = 'running'
+  })
+  close = vi.fn(async (): Promise<void> => undefined)
+
+  constructor() {
+    FakeAudioContext.instances.push(this)
   }
 }
 
@@ -56,6 +71,8 @@ function latestInstance(): FakeRecognition {
 
 beforeEach(() => {
   FakeRecognition.instances = []
+  FakeRecognition.throwOnStart = false
+  FakeAudioContext.instances = []
   clearLogs()
 })
 
@@ -131,6 +148,27 @@ describe('start', () => {
   })
 })
 
+describe('audio context', () => {
+  it('resumes on start and closes on stop', async () => {
+    installRecognition()
+    mockMicrophone(true)
+    Object.defineProperty(window, 'AudioContext', {
+      value: FakeAudioContext,
+      configurable: true,
+    })
+    try {
+      const assistant = new VoiceAssistant({ onPhrase: () => undefined, onError: () => undefined })
+      await assistant.start()
+      expect(FakeAudioContext.instances).toHaveLength(1)
+      expect(FakeAudioContext.instances[0].resume).toHaveBeenCalledTimes(1)
+      assistant.stop()
+      expect(FakeAudioContext.instances[0].close).toHaveBeenCalledTimes(1)
+    } finally {
+      delete (window as unknown as Record<string, unknown>)['AudioContext']
+    }
+  })
+})
+
 describe('results and errors', () => {
   it('emits trimmed final phrases and ignores interim results', async () => {
     installRecognition()
@@ -143,6 +181,59 @@ describe('results and errors', () => {
     latestInstance().onresult?.({ results: [{ isFinal: true, 0: { transcript: '  show screws ' } }] })
     expect(onPhrase).toHaveBeenCalledWith('show screws')
     assistant.stop()
+  })
+
+  it('tolerates stop errors from the recognizer', async () => {
+    installRecognition()
+    mockMicrophone(true)
+    const assistant = new VoiceAssistant({ onPhrase: () => undefined, onError: () => undefined })
+    await assistant.start()
+    latestInstance().stop = () => {
+      throw new Error('already stopped')
+    }
+    expect(() => assistant.stop()).not.toThrow()
+    expect(assistant.isListening()).toBe(false)
+  })
+
+  it('schedules a restart when recognition start throws', async () => {
+    vi.useFakeTimers()
+    installRecognition()
+    mockMicrophone(true)
+    FakeRecognition.throwOnStart = true
+    const assistant = new VoiceAssistant({ onPhrase: () => undefined, onError: () => undefined })
+    await assistant.start()
+    expect(FakeRecognition.instances).toHaveLength(1)
+    FakeRecognition.throwOnStart = false
+    await vi.advanceTimersByTimeAsync(500)
+    expect(FakeRecognition.instances).toHaveLength(2)
+    assistant.stop()
+  })
+
+  it('cancels a pending restart when a result arrives', async () => {
+    vi.useFakeTimers()
+    installRecognition()
+    mockMicrophone(true)
+    const assistant = new VoiceAssistant({ onPhrase: () => undefined, onError: () => undefined })
+    await assistant.start()
+    latestInstance().onend?.()
+    latestInstance().onresult?.({ results: [{ isFinal: true, 0: { transcript: 'go' } }] })
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(FakeRecognition.instances).toHaveLength(1)
+    assistant.stop()
+  })
+
+  it('reports when recognition disappears mid-restart', async () => {
+    vi.useFakeTimers()
+    installRecognition()
+    mockMicrophone(true)
+    const onError = vi.fn()
+    const assistant = new VoiceAssistant({ onPhrase: () => undefined, onError })
+    await assistant.start()
+    latestInstance().onend?.()
+    uninstallRecognition()
+    await vi.advanceTimersByTimeAsync(500)
+    expect(onError).toHaveBeenCalledWith('Speech recognition not supported on this device')
+    expect(assistant.isListening()).toBe(false)
   })
 
   it('stops without retry on microphone permission errors', async () => {

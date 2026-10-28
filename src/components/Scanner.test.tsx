@@ -7,6 +7,7 @@ import {
   reasonSpatial,
   segmentImage,
 } from '../services/metaApi'
+import { parseSamStream } from '../services/samParser'
 import type { SamStreamEvent } from '../services/metaApi'
 import type { VoiceAssistantCallbacks } from '../services/voiceAssistant'
 import type { SpatialResult } from '../types'
@@ -561,6 +562,291 @@ describe('Scanner', () => {
     expect(
       getLogs().some((e) => e.tag === 'reason' && e.message.includes('"Blend door" @ (40,60)')),
     ).toBe(true)
+  })
+
+  it('speaks confirmations in speech-and-visual mode', async () => {
+    const speak = vi.fn()
+    const cancel = vi.fn()
+    class FakeUtterance {
+      text: string
+      rate = 0
+      constructor(text: string) {
+        this.text = text
+      }
+    }
+    Object.defineProperty(window, 'speechSynthesis', {
+      value: { speak, cancel },
+      configurable: true,
+    })
+    Object.defineProperty(window, 'SpeechSynthesisUtterance', {
+      value: FakeUtterance,
+      configurable: true,
+    })
+    try {
+      mockCamera(true)
+      vi.mocked(reasonSpatial).mockResolvedValue({
+        target_label: 'Screw',
+        approx_x: 10,
+        approx_y: 10,
+        speech_response: 'done',
+        display_mode: 'speech_and_visual',
+      })
+      render(<Scanner />)
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('go')
+      })
+      expect(cancel).toHaveBeenCalledTimes(1)
+      expect(speak).toHaveBeenCalledTimes(1)
+      expect((speak.mock.calls[0][0] as FakeUtterance).text).toBe('done')
+    } finally {
+      delete (window as unknown as Record<string, unknown>)['speechSynthesis']
+      delete (window as unknown as Record<string, unknown>)['SpeechSynthesisUtterance']
+    }
+  })
+
+  it.each<[string, string, string]>([
+    ['Electrical connector', '#ffff00', 'rgb(255, 255, 0)'],
+    ['Mounting screw', '#ff0000', 'rgb(255, 0, 0)'],
+    ['Blend door', '#00ffff', 'rgb(0, 255, 255)'],
+  ])('marks %s with the %s callout dot', async (label, hex, rgb) => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: label,
+      approx_x: 10,
+      approx_y: 10,
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('go')
+    })
+    const pill = await screen.findByText(label)
+    const style = pill.querySelector('span')?.getAttribute('style') ?? ''
+    expect(style.includes(hex) || style.includes(rgb)).toBe(true)
+  })
+
+  it('warns when reasoning returns no target', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: '',
+      approx_x: 0,
+      approx_y: 0,
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('nothing here')
+    })
+    expect(getLogs().some((e) => e.level === 'warn' && e.message.includes('no target'))).toBe(
+      true,
+    )
+    expect(segmentImage).not.toHaveBeenCalled()
+    expect(screen.getByText('[ OFF ]')).toBeInTheDocument()
+  })
+
+  it('shows an error when no frame is captured', async () => {
+    mockCamera(true)
+    vi.mocked(captureFrameBurst).mockResolvedValue([])
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('go')
+    })
+    expect(await screen.findByText('[ ⚠ ERROR ]')).toBeInTheDocument()
+  })
+
+  it('ignores phrases after unmount', async () => {
+    mockCamera(true)
+    const { unmount } = render(<Scanner />)
+    const callbacks = assistants[0].callbacks
+    unmount()
+    await act(async () => {
+      callbacks.onPhrase('late phrase')
+    })
+    expect(reasonSpatial).not.toHaveBeenCalled()
+  })
+
+  it('stops the stream when unmounted mid-init', async () => {
+    let resolveStream!: (stream: MediaStream) => void
+    const stop = vi.fn()
+    const getUserMedia = vi.fn(
+      () =>
+        new Promise<MediaStream>((resolve) => {
+          resolveStream = resolve
+        }),
+    )
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: { getUserMedia, enumerateDevices: async () => [] },
+      configurable: true,
+    })
+    const { unmount } = render(<Scanner />)
+    await waitFor(() => {
+      expect(getUserMedia).toHaveBeenCalledTimes(1)
+    })
+    unmount()
+    await act(async () => {
+      resolveStream({ getTracks: () => [{ stop }] } as unknown as MediaStream)
+    })
+    expect(stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('warns when video autoplay is blocked', async () => {
+    const play = vi.fn(async () => {
+      throw new Error('blocked')
+    })
+    const proto = window.HTMLVideoElement.prototype as unknown as Record<string, unknown>
+    const original = Object.getOwnPropertyDescriptor(proto, 'play')
+    Object.defineProperty(proto, 'play', { value: play, configurable: true, writable: true })
+    try {
+      mockCamera(true)
+      render(<Scanner />)
+      await waitFor(() => {
+        expect(
+          getLogs().some((e) => e.level === 'warn' && e.message.includes('autoplay')),
+        ).toBe(true)
+      })
+    } finally {
+      if (original) {
+        Object.defineProperty(proto, 'play', original)
+      } else {
+        delete proto['play']
+      }
+    }
+  })
+
+  it('keeps the switcher when enumeration fails', async () => {
+    mockCamera(true)
+    const md = navigator.mediaDevices as unknown as { getUserMedia: unknown }
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {
+        getUserMedia: md.getUserMedia,
+        enumerateDevices: vi.fn(async () => {
+          throw new Error('nope')
+        }),
+      },
+      configurable: true,
+    })
+    render(<Scanner />)
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+    expect(screen.getByRole('button', { name: 'Switch camera' })).toBeInTheDocument()
+  })
+
+  it('paints mask overlays on the canvas', async () => {
+    const ctx = new Proxy(
+      { marker: 'ctx' },
+      {
+        get: (target, prop) => {
+          if (prop === 'createImageData') {
+            return (w: number, h: number) => ({
+              data: new Uint8ClampedArray(w * h * 4),
+              width: w,
+              height: h,
+            })
+          }
+          return (target as Record<PropertyKey, unknown>)[prop] ?? (() => undefined)
+        },
+        set: () => true,
+      },
+    )
+    const ctxSpy = vi
+      .spyOn(window.HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue(ctx as unknown as CanvasRenderingContext2D)
+    try {
+      mockCamera(true)
+      vi.mocked(reasonSpatial).mockResolvedValue({
+        target_label: 'Screw',
+        approx_x: 10,
+        approx_y: 10,
+        speech_response: null,
+        display_mode: 'visual_only',
+      })
+      vi.mocked(parseSamStream).mockResolvedValueOnce([
+        {
+          frame: 0,
+          ordinal: 0,
+          objectId: '0',
+          box: { x1: 0, y1: 0, x2: 1, y2: 1, w: 2, h: 2 },
+          raster: Uint8Array.from([1, 0, 0, 0]),
+        },
+      ])
+      render(<Scanner />)
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('show screws')
+      })
+      expect(screen.getByText('Screw')).toBeInTheDocument()
+    } finally {
+      ctxSpy.mockRestore()
+    }
+  })
+
+  it('skips canvas churn when idle and already sized', async () => {
+    const clearRect = vi.fn()
+    const ctx = new Proxy(
+      { marker: 'ctx' },
+      {
+        get: (target, prop) => {
+          if (prop === 'clearRect') return clearRect
+          return (target as Record<PropertyKey, unknown>)[prop] ?? (() => undefined)
+        },
+        set: () => true,
+      },
+    )
+    const ctxSpy = vi
+      .spyOn(window.HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue(ctx as unknown as CanvasRenderingContext2D)
+    try {
+      mockCamera(true)
+      vi.mocked(reasonSpatial).mockResolvedValue({
+        target_label: 'Screw',
+        approx_x: 10,
+        approx_y: 10,
+        speech_response: null,
+        display_mode: 'visual_only',
+      })
+      render(<Scanner />)
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('first')
+      })
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('second')
+      })
+      expect(clearRect).toHaveBeenCalledTimes(1)
+    } finally {
+      ctxSpy.mockRestore()
+    }
+  })
+
+  it('keeps the overlay when a refresh fails', async () => {
+    vi.useFakeTimers()
+    try {
+      mockCamera(true)
+      vi.mocked(reasonSpatial).mockResolvedValue({
+        target_label: 'Screw',
+        approx_x: 10,
+        approx_y: 10,
+        speech_response: null,
+        display_mode: 'visual_only',
+      })
+      render(<Scanner />)
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('show screws')
+      })
+      expect(screen.getByText('Screw')).toBeInTheDocument()
+      vi.mocked(parseSamStream).mockRejectedValueOnce(new Error('boom'))
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2100)
+      })
+      expect(segmentImage).toHaveBeenCalledTimes(2)
+      expect(screen.getByText('Screw')).toBeInTheDocument()
+      expect(getLogs().some((e) => e.level === 'warn' && e.message.includes('refresh failed'))).toBe(
+        true,
+      )
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('recovers to listening after a pipeline failure', async () => {
