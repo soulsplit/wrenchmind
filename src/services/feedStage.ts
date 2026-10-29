@@ -169,6 +169,11 @@ export interface TapMedia {
  * untransformed geometry first. Pan cancels out of the box-relative
  * fraction, so only the stage scale is needed; percents stay in the
  * untransformed space the in-stage callout is positioned in.
+ *
+ * When the stage is CSS-mirrored (desktop/front self-view), the prompt
+ * flips against the stage width back to raw-frame pixels, while the
+ * callout percents stay at the tap: overlays paint in media space on the
+ * equally mirrored canvas, so everything lands under the finger.
  */
 export function tapToMedia(
   clientX: number,
@@ -177,6 +182,7 @@ export function tapToMedia(
   videoW: number,
   videoH: number,
   stageScale = 1,
+  mirrored = false,
 ): TapMedia | undefined {
   if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return undefined
   if (!Number.isFinite(videoW) || !Number.isFinite(videoH) || videoW <= 0 || videoH <= 0) {
@@ -191,7 +197,7 @@ export function tapToMedia(
   const h = rect.height / stageScale
   const px = (clientX - rect.left) / stageScale
   const py = (clientY - rect.top) / stageScale
-  const media = coverToMedia(px, py, w, h, videoW, videoH)
+  const media = coverToMedia(mirrored ? w - px : px, py, w, h, videoW, videoH)
   return {
     point: { ...media, width: videoW, height: videoH },
     x: clampPct(((clientX - rect.left) / rect.width) * 100),
@@ -232,6 +238,8 @@ export interface MediaRegion {
  * Map a circle-trace bounding box (untransformed stage coords) to media
  * pixels. Corners map independently through the cover inverse, so the box
  * stays correct under zoom and pan. Undefined when dims are unknown.
+ * Mirrored stages flip both corners against the stage width first; the
+ * min/max ordering below keeps the box valid either way.
  */
 export function stageBoxToMedia(
   ax: number,
@@ -242,6 +250,7 @@ export function stageBoxToMedia(
   stageH: number,
   videoW: number,
   videoH: number,
+  mirrored = false,
 ): MediaRegion | undefined {
   if (![ax, ay, bx, by].every(Number.isFinite)) return undefined
   if (!Number.isFinite(stageW) || !Number.isFinite(stageH) || stageW <= 0 || stageH <= 0) {
@@ -250,8 +259,8 @@ export function stageBoxToMedia(
   if (!Number.isFinite(videoW) || !Number.isFinite(videoH) || videoW <= 0 || videoH <= 0) {
     return undefined
   }
-  const c1 = coverToMedia(ax, ay, stageW, stageH, videoW, videoH)
-  const c2 = coverToMedia(bx, by, stageW, stageH, videoW, videoH)
+  const c1 = coverToMedia(mirrored ? stageW - ax : ax, ay, stageW, stageH, videoW, videoH)
+  const c2 = coverToMedia(mirrored ? stageW - bx : bx, by, stageW, stageH, videoW, videoH)
   return {
     box: {
       x1: Math.min(c1.x, c2.x),

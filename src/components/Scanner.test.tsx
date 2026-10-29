@@ -23,6 +23,7 @@ import { fetchGuidance } from '../services/guidanceApi'
 import { searchGuides } from '../services/ifixitApi'
 import { cancelSpeech, speakText } from '../services/speechOutput'
 import { useKeyboardShift } from '../hooks/useKeyboardShift'
+import { useDesktopLayout } from '../hooks/useDesktopLayout'
 import type { SamStreamEvent } from '../services/metaApi'
 import type { VoiceAssistantCallbacks } from '../services/voiceAssistant'
 import type { GuidanceResult, MaskRecord, SpatialResult } from '../types'
@@ -80,6 +81,10 @@ vi.mock('../services/speechOutput', () => ({
 
 vi.mock('../hooks/useKeyboardShift', () => ({
   useKeyboardShift: vi.fn(() => 0),
+}))
+
+vi.mock('../hooks/useDesktopLayout', () => ({
+  useDesktopLayout: vi.fn(() => false),
 }))
 
 vi.mock('../services/voiceAssistant', () => {
@@ -310,6 +315,7 @@ beforeEach(() => {
   vi.mocked(speakText).mockReset().mockResolvedValue(undefined)
   vi.mocked(cancelSpeech).mockReset()
   vi.mocked(useKeyboardShift).mockReset().mockReturnValue(0)
+  vi.mocked(useDesktopLayout).mockReset().mockReturnValue(false)
 })
 
 afterEach(() => {
@@ -358,6 +364,35 @@ describe('Scanner', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Switch camera' }))
     await waitFor(() =>
       expect(getUserMedia).toHaveBeenCalledTimes(3),
+    )
+  })
+
+  it('leaves the mobile rear feed unmirrored', () => {
+    mockCamera(true)
+    render(<Scanner />)
+    expect(screen.getByLabelText('Live camera feed')).not.toHaveClass('-scale-x-100')
+  })
+
+  it('mirrors the mobile front camera', async () => {
+    const stream = new MediaStream()
+    if (typeof stream.getTracks !== 'function') {
+      stream.getTracks = () => []
+    }
+    const track = {
+      stop: vi.fn(),
+      getSettings: () => ({ facingMode: 'user' }),
+    } as unknown as MediaStreamTrack
+    stream.getVideoTracks = () => [track]
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {
+        getUserMedia: vi.fn(async (): Promise<MediaStream> => stream),
+        enumerateDevices: vi.fn(async (): Promise<{ kind: string }[]> => []),
+      },
+      configurable: true,
+    })
+    render(<Scanner />)
+    await waitFor(() =>
+      expect(screen.getByLabelText('Live camera feed')).toHaveClass('-scale-x-100'),
     )
   })
 
@@ -2300,6 +2335,17 @@ describe('Scanner states (Wave 3)', () => {
     expect(screen.getByRole('status', { name: 'Located: Blend door' })).toBeInTheDocument()
   })
 
+  it('flips desktop voice callouts into stage coords', async () => {
+    vi.mocked(useDesktopLayout).mockReturnValue(true)
+    mockCamera(true)
+    await phraseWithTarget('Blend door', 40, 60)
+    // The model answers in raw-frame coords; the mirrored stage shows that
+    // content at 100 - 40.
+    expect(
+      styleAttr(screen.getByRole('status', { name: 'Located: Blend door' })),
+    ).toContain('left: 60%')
+  })
+
   it('paints neon outlines while keeping per-kind colors', async () => {
     const writes: Array<[string, unknown]> = []
     const ctx = new Proxy(
@@ -3101,6 +3147,46 @@ describe('Scanner freeze frame', () => {
         'data:image/jpeg;base64,AAA',
         'tapped part',
         { x: 320, y: 240, width: 640, height: 480 },
+      )
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('mirrors the feed, still, and overlay canvas on desktop', async () => {
+    vi.mocked(useDesktopLayout).mockReturnValue(true)
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      expect(screen.getByLabelText('Live camera feed')).toHaveClass('-scale-x-100')
+      expect(container.querySelector('canvas')).toHaveClass('-scale-x-100')
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      expect(screen.getByAltText('Frozen frame')).toHaveClass('-scale-x-100')
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('flips desktop tap prompts to raw-frame pixels', async () => {
+    vi.mocked(useDesktopLayout).mockReturnValue(true)
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      const layer = tapTarget()
+      setTapRect(layer, { left: 0, top: 0, width: 320, height: 240 })
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 80, clientY: 120 })
+      })
+      // A quarter across the mirrored stage is three quarters across the frame.
+      expect(segmentImage).toHaveBeenCalledWith(
+        'data:image/jpeg;base64,AAA',
+        'tapped part',
+        { x: 480, y: 240, width: 640, height: 480 },
       )
     } finally {
       media.restore()
@@ -4067,6 +4153,15 @@ describe('tapToMedia', () => {
     expect(tapToMedia(10, 10, rect, 640, 480, 0)).toBeUndefined()
     expect(tapToMedia(10, 10, rect, 640, 480, -2)).toBeUndefined()
   })
+
+  it('mirrors the prompt against the stage width when the feed is flipped', () => {
+    // Tap a quarter across the displayed stage: the raw frame holds that
+    // content three quarters across, while the callout stays at the tap.
+    const tap = tapToMedia(80, 120, { left: 0, top: 0, width: 320, height: 240 }, 640, 480, 1, true)
+    expect(tap?.point).toEqual({ x: 480, y: 240, width: 640, height: 480 })
+    expect(tap?.x).toBe(25)
+    expect(tap?.y).toBe(50)
+  })
 })
 
 describe('clampZoomPan', () => {
@@ -4155,6 +4250,16 @@ describe('stageBoxToMedia', () => {
     expect(stageBoxToMedia(0, 0, 10, 10, 0, 240, 640, 480)).toBeUndefined()
     expect(stageBoxToMedia(0, 0, 10, 10, 320, 240, 0, 480)).toBeUndefined()
     expect(stageBoxToMedia(NaN, 0, 10, 10, 320, 240, 640, 480)).toBeUndefined()
+  })
+
+  it('mirrors the box against the stage width when the feed is flipped', () => {
+    // Loop over the left quarter of the displayed stage: the raw frame
+    // holds it on the right, while the callout stays over the loop.
+    expect(stageBoxToMedia(40, 60, 120, 180, 320, 240, 640, 480, true)).toEqual({
+      box: { x1: 400, y1: 120, x2: 560, y2: 360 },
+      x: 25,
+      y: 50,
+    })
   })
 })
 

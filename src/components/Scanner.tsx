@@ -288,6 +288,17 @@ export default function Scanner() {
   // hosts the guidance card; the bottom-docked card unmounts to avoid
   // duplicating it.
   const isDesktop = useDesktopLayout()
+  /**
+   * Mirror self-view: desktop webcams and front cameras render flipped so
+   * the feed acts like a mirror. Display flips via CSS (-scale-x-100 on the
+   * video, still, and overlay canvas); taps, circles, and voice approx
+   * coords flip back to raw-frame pixels before reaching SAM, while
+   * callouts stay in untransformed stage space. The ref mirror keeps the
+   * stable handlePhrase voice path flip-aware without re-subscribing.
+   */
+  const mirrored = isDesktop || actualFacing === 'user'
+  const mirroredRef = useRef(mirrored)
+  mirroredRef.current = mirrored
   // Keyboard lift: the bottom dock alone rides above the visual viewport.
   const keyboardShift = useKeyboardShift()
 
@@ -890,7 +901,8 @@ export default function Scanner() {
           })
           setCallout({
             label: plural ? `${recs.length} × ${result.target_label}` : result.target_label,
-            x: result.approx_x,
+            // The model answers in raw-frame coords; flip into stage space.
+            x: mirroredRef.current ? 100 - result.approx_x : result.approx_x,
             y: result.approx_y,
             kind,
           })
@@ -986,6 +998,7 @@ export default function Scanner() {
           vw,
           vh,
           zoomRef.current.scale,
+          mirroredRef.current,
         )
         if (!tap) throw new Error('No video frame')
         const img = captureVideoFrame(el)
@@ -1064,6 +1077,7 @@ export default function Scanner() {
           stage.clientHeight,
           vw,
           vh,
+          mirroredRef.current,
         )
         if (!region) throw new Error('No video frame')
         const img = captureVideoFrame(el)
@@ -1139,6 +1153,7 @@ export default function Scanner() {
         vw,
         vh,
         zoomRef.current.scale,
+        mirroredRef.current,
       )
       if (!tap) return
       const { x: mx, y: my } = tap.point
@@ -1475,14 +1490,14 @@ export default function Scanner() {
         playsInline
         muted
         aria-label="Live camera feed"
-        className="absolute inset-0 w-full h-full object-cover"
+        className={`absolute inset-0 w-full h-full object-cover${mirrored ? ' -scale-x-100' : ''}`}
       />
       {stillUrl && !cameraLive && (
         <img
           src={stillUrl}
           alt="Frozen frame"
           draggable={false}
-          className="absolute inset-0 w-full h-full object-cover"
+          className={`absolute inset-0 w-full h-full object-cover${mirrored ? ' -scale-x-100' : ''}`}
         />
       )}
       {/*
@@ -1492,7 +1507,7 @@ export default function Scanner() {
       <canvas
         ref={canvasRef}
         aria-hidden="true"
-        className="absolute inset-0 w-full h-full object-cover pointer-events-none"
+        className={`absolute inset-0 w-full h-full object-cover pointer-events-none${mirrored ? ' -scale-x-100' : ''}`}
       />
       {/*
         Tap layer (frozen or live camera): above the canvas, below the
