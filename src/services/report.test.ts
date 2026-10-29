@@ -65,6 +65,71 @@ describe('buildReport', () => {
     expect(buildReport({ guidance, stepIndex: 0 })).not.toContain('<img')
   })
 
+  it('renders earlier procedures oldest-first with their own progress marks', () => {
+    const first = {
+      ...guidance,
+      title: 'ALTERNATOR BELT',
+      steps: [{ title: 'Loosen pivot bolt', detail: 'Crack it, do not remove.' }],
+    }
+    const second = {
+      ...guidance,
+      title: 'WATER PUMP',
+      steps: [{ title: 'Drain coolant', detail: 'Open the petcock.' }],
+    }
+    const report = buildReport({
+      guidance,
+      stepIndex: 1,
+      history: [
+        { guidance: first, stepIndex: 1 },
+        { guidance: second, stepIndex: 0 },
+      ],
+    })
+    expect(report).toContain('<h2>Earlier this session</h2>')
+    // Current procedure first, then history oldest-first.
+    const order = [
+      report.indexOf('<h2>MID-DRIVE DRIVE BELT</h2>'),
+      report.indexOf('<h2>Earlier this session</h2>'),
+      report.indexOf('<h2>ALTERNATOR BELT</h2>'),
+      report.indexOf('<h2>WATER PUMP</h2>'),
+    ]
+    expect(order).toEqual([...order].sort((a, b) => a - b))
+    // Marks follow each snapshot's own stepIndex, not the live one.
+    expect(report).toContain('[x] Step 1: Loosen pivot bolt')
+    expect(report).toContain('[&gt;] Step 1: Drain coolant')
+  })
+
+  it('renders history when the current procedure was cleared', () => {
+    const report = buildReport({
+      guidance: null,
+      stepIndex: 0,
+      history: [{ guidance, stepIndex: 2 }],
+    })
+    expect(report).toContain('<h2>MID-DRIVE DRIVE BELT</h2>')
+    expect(report).toContain('[x] Step 2: Release belt tension')
+    expect(report).not.toContain('No repair guidance was generated this session.')
+  })
+
+  it('keeps the empty message only when current and history are both absent', () => {
+    expect(buildReport({ guidance: null, stepIndex: 0 })).toContain(
+      'No repair guidance was generated this session.',
+    )
+    expect(buildReport({ guidance: null, stepIndex: 0, history: [] })).toContain(
+      'No repair guidance was generated this session.',
+    )
+  })
+
+  it('embeds photos for the current procedure only, never for history', () => {
+    const photos = [{ step: 0, dataUrl: 'data:image/jpeg;base64,BBB' }]
+    const report = buildReport({
+      guidance,
+      stepIndex: 0,
+      photos,
+      history: [{ guidance, stepIndex: 0 }],
+    })
+    expect(report.match(/<img /g)).toHaveLength(1)
+    expect(report).toContain('<img alt="Step 1 photo" src="data:image/jpeg;base64,BBB">')
+  })
+
   it('escapes markup in model, finding, and log content', () => {
     logInfo('phrase', '<img src=x onerror=alert(1)>')
     const evil = {

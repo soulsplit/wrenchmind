@@ -1,6 +1,12 @@
 import type { GuidanceResult } from '../types'
 import { getLogs } from './logger'
 
+/** A superseded procedure: the guidance plus the step reached with it. */
+export interface ProcedureSnapshot {
+  guidance: GuidanceResult
+  stepIndex: number
+}
+
 export interface ReportInput {
   guidance: GuidanceResult | null
   stepIndex: number
@@ -10,6 +16,8 @@ export interface ReportInput {
   findings?: string[]
   /** Step checkpoints: 0-based step index plus JPEG data URL. */
   photos?: { step: number; dataUrl: string }[]
+  /** Earlier procedures, oldest first; rendered without photos. */
+  history?: ProcedureSnapshot[]
 }
 
 /** Max checkpoint photos embedded per report; data URLs bloat fast. */
@@ -35,11 +43,60 @@ const REPORT_CSS = [
 ].join('')
 
 /**
- * Build a self-contained HTML repair report: the procedure with step
- * progress and checkpoint photos, plus the session log. Debug chatter is
- * dropped; info/warn/error stays. Static file, no scripts.
+ * Render one procedure: title, manual, steps with progress marks, specs,
+ * tools, warnings, sources. Shared by the current procedure (with photos)
+ * and history snapshots (without) so the two paths can't drift.
  */
-export function buildReport({ guidance, stepIndex, workingOn, findings, photos }: ReportInput): string {
+function renderProcedure(
+  out: string[],
+  guidance: GuidanceResult,
+  stepIndex: number,
+  photoByStep?: Map<number, string>,
+): void {
+  const esc = escapeHtml
+  out.push(`<h2>${esc(guidance.title)}</h2>`)
+  out.push(
+    guidance.manualTitle
+      ? `<p>Manual: ${esc(guidance.manualTitle)}</p>`
+      : '<p>Manual: not found — verify against your manual.</p>',
+  )
+  out.push('<h3>Steps</h3>')
+  guidance.steps.forEach((step, i) => {
+    const mark = i < stepIndex ? '[x]' : i === stepIndex ? '[>]' : '[ ]'
+    out.push(`<p>${esc(`${mark} Step ${i + 1}: ${step.title} — ${step.detail}`)}</p>`)
+    if (step.warning) out.push(`<p class="warning">Warning: ${esc(step.warning)}</p>`)
+    const photo = photoByStep?.get(i)
+    if (photo) out.push(`<img alt="Step ${i + 1} photo" src="${esc(photo)}">`)
+  })
+  if (guidance.specs.length > 0) {
+    out.push('<h3>Specs (verify against the manual)</h3>', '<ul>')
+    for (const spec of guidance.specs) out.push(`<li>${esc(spec.label)}: ${esc(spec.value)}</li>`)
+    out.push('</ul>')
+  }
+  if (guidance.tools.length > 0) out.push(`<p>Tools: ${esc(guidance.tools.join(', '))}</p>`)
+  out.push('<h3>Warnings</h3>', '<ul>')
+  if (guidance.warnings.length > 0) {
+    for (const warning of guidance.warnings) out.push(`<li>${esc(warning)}</li>`)
+  } else {
+    out.push('<li>No specific warnings listed — verify all work against the manual.</li>')
+  }
+  out.push('</ul>')
+  if (guidance.sources.length > 0) {
+    out.push('<h3>Sources</h3>', '<ul>')
+    for (const source of guidance.sources) {
+      out.push(`<li><a href="${esc(source.url)}">${esc(source.title)}</a></li>`)
+    }
+    out.push('</ul>')
+  }
+}
+
+/**
+ * Build a self-contained HTML repair report: the current procedure with
+ * step progress and checkpoint photos, earlier procedures gathered this
+ * session, plus the session log. Debug chatter is dropped; info/warn/error
+ * stays. Static file, no scripts.
+ */
+export function buildReport({ guidance, stepIndex, workingOn, findings, photos, history }: ReportInput): string {
   const esc = escapeHtml
   const out: string[] = [
     '<!DOCTYPE html>',
@@ -55,46 +112,20 @@ export function buildReport({ guidance, stepIndex, workingOn, findings, photos }
     `<p class="meta">Working on: ${workingOn && workingOn.length > 0 ? esc(workingOn.join(', ')) : 'not established'}</p>`,
     '<p class="print-hint">Tip: Print → Save as PDF for a PDF copy.</p>',
   ]
-  if (!guidance) {
+  const past = history ?? []
+  if (!guidance && past.length === 0) {
     out.push('<p>No repair guidance was generated this session.</p>')
   } else {
-    out.push(`<h2>${esc(guidance.title)}</h2>`)
-    out.push(
-      guidance.manualTitle
-        ? `<p>Manual: ${esc(guidance.manualTitle)}</p>`
-        : '<p>Manual: not found — verify against your manual.</p>',
-    )
-    out.push('<h3>Steps</h3>')
-    // First-10-wins by step order: earliest checkpoints survive the cap.
-    const photoByStep = new Map(
-      [...(photos ?? [])].sort((a, b) => a.step - b.step).slice(0, MAX_REPORT_PHOTOS).map((p) => [p.step, p.dataUrl] as const),
-    )
-    guidance.steps.forEach((step, i) => {
-      const mark = i < stepIndex ? '[x]' : i === stepIndex ? '[>]' : '[ ]'
-      out.push(`<p>${esc(`${mark} Step ${i + 1}: ${step.title} — ${step.detail}`)}</p>`)
-      if (step.warning) out.push(`<p class="warning">Warning: ${esc(step.warning)}</p>`)
-      const photo = photoByStep.get(i)
-      if (photo) out.push(`<img alt="Step ${i + 1} photo" src="${esc(photo)}">`)
-    })
-    if (guidance.specs.length > 0) {
-      out.push('<h3>Specs (verify against the manual)</h3>', '<ul>')
-      for (const spec of guidance.specs) out.push(`<li>${esc(spec.label)}: ${esc(spec.value)}</li>`)
-      out.push('</ul>')
+    if (guidance) {
+      // First-10-wins by step order: earliest checkpoints survive the cap.
+      const photoByStep = new Map(
+        [...(photos ?? [])].sort((a, b) => a.step - b.step).slice(0, MAX_REPORT_PHOTOS).map((p) => [p.step, p.dataUrl] as const),
+      )
+      renderProcedure(out, guidance, stepIndex, photoByStep)
     }
-    if (guidance.tools.length > 0) out.push(`<p>Tools: ${esc(guidance.tools.join(', '))}</p>`)
-    out.push('<h3>Warnings</h3>', '<ul>')
-    if (guidance.warnings.length > 0) {
-      for (const warning of guidance.warnings) out.push(`<li>${esc(warning)}</li>`)
-    } else {
-      out.push('<li>No specific warnings listed — verify all work against the manual.</li>')
-    }
-    out.push('</ul>')
-    if (guidance.sources.length > 0) {
-      out.push('<h3>Sources</h3>', '<ul>')
-      for (const source of guidance.sources) {
-        out.push(`<li><a href="${esc(source.url)}">${esc(source.title)}</a></li>`)
-      }
-      out.push('</ul>')
+    if (past.length > 0) {
+      out.push('<h2>Earlier this session</h2>')
+      for (const snap of past) renderProcedure(out, snap.guidance, snap.stepIndex)
     }
   }
   if (findings && findings.length > 0) {
