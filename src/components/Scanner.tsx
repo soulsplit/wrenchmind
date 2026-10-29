@@ -38,7 +38,11 @@ import { fetchGuidance } from '../services/guidanceApi'
 import { buildQuery, searchGuides, type FixitGuide } from '../services/ifixitApi'
 import { downloadReport, shareReport } from '../services/report'
 import { VoiceAssistant } from '../services/voiceAssistant'
-import { permissionBlocker, secureContextBlocker } from '../services/mediaSupport'
+import {
+  describeCameraError,
+  permissionBlocker,
+  secureContextBlocker,
+} from '../services/mediaSupport'
 import { logDebug, logError, logInfo, logWarn } from '../services/logger'
 import QueryBar from './QueryBar'
 import Header from './Header'
@@ -416,13 +420,18 @@ export default function Scanner() {
         { label: other, constraints: { video: { facingMode: other, ...hiRes } } },
         { label: 'any', constraints: { video: true } },
       ]
+      let lastError: unknown = null
       for (const { label, constraints } of attempts) {
         try {
           stream = await navigator.mediaDevices.getUserMedia(constraints)
           logInfo('camera', `using ${label} camera`)
           break
-        } catch {
-          logWarn('camera', `${label} camera unavailable`)
+        } catch (e) {
+          // The exception name is the diagnosis (dismissed prompt vs busy
+          // hardware), so it rides into the log and the final message.
+          lastError = e
+          const name = e instanceof Error ? e.name : 'UnknownError'
+          logWarn('camera', `${label} camera unavailable (${name})`)
           stream = null
         }
       }
@@ -431,7 +440,8 @@ export default function Scanner() {
         return
       }
       if (!stream) {
-        const hint = (await permissionBlocker('camera', 'Camera access')) ?? 'Camera access denied'
+        const hint =
+          (await permissionBlocker('camera', 'Camera access')) ?? describeCameraError(lastError)
         logError('camera', `all camera attempts failed (${hint})`)
         setError(hint)
         // Failed restart (a still exists, so this is not initial load):

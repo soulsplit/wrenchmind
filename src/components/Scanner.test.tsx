@@ -464,6 +464,20 @@ describe('Scanner', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Camera access denied')
   })
 
+  it('names the real cause when getUserMedia rejects with a named error', async () => {
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {
+        getUserMedia: vi.fn(async () => {
+          throw new DOMException('busy', 'NotReadableError')
+        }),
+        enumerateDevices: vi.fn(async () => []),
+      },
+      configurable: true,
+    })
+    render(<Scanner />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('Camera is busy')
+  })
+
   it('dims the LIVE badge when the camera never starts', async () => {
     mockCamera(false)
     render(<Scanner />)

@@ -20,6 +20,35 @@ export function secureContextBlocker(kind: 'Camera' | 'Microphone'): string | nu
   return null
 }
 
+/**
+ * Actionable message for a getUserMedia failure. The DOMException name is
+ * the only signal distinguishing a dismissed prompt from a busy or missing
+ * camera, so callers must pass the caught error through instead of a
+ * static string. Unknown shapes keep the legacy generic message.
+ */
+export function describeCameraError(error: unknown): string {
+  const name =
+    error instanceof DOMException
+      ? error.name
+      : typeof (error as { name?: unknown })?.name === 'string'
+        ? (error as { name: string }).name
+        : ''
+  switch (name) {
+    case 'NotAllowedError':
+      return (
+        'Camera permission was dismissed — tap Allow in the prompt, ' +
+        'or re-enable it in site settings and reload.'
+      )
+    case 'NotReadableError':
+      return 'Camera is busy — close other tabs or apps using it, then reload.'
+    case 'NotFoundError':
+    case 'OverconstrainedError':
+      return 'No usable camera found on this device.'
+    default:
+      return 'Camera access denied'
+  }
+}
+
 /** Non-null when the permission is already in the blocked state. */
 export async function permissionBlocker(
   name: 'camera' | 'microphone',

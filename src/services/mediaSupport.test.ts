@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { permissionBlocker, secureContextBlocker } from './mediaSupport'
+import { describeCameraError, permissionBlocker, secureContextBlocker } from './mediaSupport'
 
 const originalSecureContext = Object.getOwnPropertyDescriptor(window, 'isSecureContext')
 const originalMediaDevices = Object.getOwnPropertyDescriptor(navigator, 'mediaDevices')
@@ -91,5 +91,34 @@ describe('permissionBlocker', () => {
       configurable: true,
     })
     await expect(permissionBlocker('microphone', 'Microphone access')).resolves.toBeNull()
+  })
+})
+
+describe('describeCameraError', () => {
+  it('maps a dismissed prompt to the allow-again message', () => {
+    expect(describeCameraError(new DOMException('dismissed', 'NotAllowedError'))).toContain(
+      'tap Allow',
+    )
+  })
+
+  it('maps busy hardware to the close-other-tabs message', () => {
+    expect(describeCameraError(new DOMException('busy', 'NotReadableError'))).toContain(
+      'Camera is busy',
+    )
+  })
+
+  it('maps missing hardware to the no-camera message', () => {
+    expect(describeCameraError(new DOMException('none', 'NotFoundError'))).toContain(
+      'No usable camera',
+    )
+    expect(describeCameraError(new DOMException('none', 'OverconstrainedError'))).toContain(
+      'No usable camera',
+    )
+  })
+
+  it('keeps the legacy generic message for unknown shapes', () => {
+    expect(describeCameraError(new Error('denied'))).toBe('Camera access denied')
+    expect(describeCameraError(null)).toBe('Camera access denied')
+    expect(describeCameraError('nope')).toBe('Camera access denied')
   })
 })
