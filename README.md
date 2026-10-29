@@ -1,6 +1,9 @@
-# WrenchMind PWA
+# WrenchMind
 
 > They talk about your engine. WrenchMind points at it.
+
+Built for the [Meta Global Hackathon](https://dev.meta.ai/events/global-hackathon).
+**Note to us: submit everything on November 3rd** (ahead of the event's final deadline).
 
 What it does:
 
@@ -10,8 +13,7 @@ What it does:
   warnings, and manual/source links.
 - Hands-free voice loop with a typed query bar that runs the same pipeline.
 
-**Live demo:** https://soulsplit.github.io/wrenchmind/ (deployed from `main`
-via GitHub Actions; camera and mic work directly since Pages serves HTTPS).
+**Live demo:** https://soulsplit.github.io/wrenchmind/
 
 ## Quickstart (local)
 
