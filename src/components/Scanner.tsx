@@ -391,6 +391,14 @@ export default function Scanner() {
         ctx.font = 'bold 24px system-ui, sans-serif'
         const badgeY = Math.max(28, box.y1 - 4)
         const badgeW = ctx.measureText(label).width + 16
+        if (mirroredRef.current) {
+          // Counter-flip: mirror the badge around its own center so the
+          // pill lands on the same pixels while the glyphs pre-mirror —
+          // the CSS flip then restores readable text on screen. Display
+          // only: exports capture the raw video/still, never this canvas.
+          ctx.translate(2 * (box.x1 + badgeW / 2), 0)
+          ctx.scale(-1, 1)
+        }
         ctx.fillStyle = 'rgba(0, 0, 0, 0.75)'
         ctx.fillRect(box.x1, badgeY - 28, badgeW, 28)
         ctx.fillStyle = STROKE[kind]
@@ -760,6 +768,24 @@ export default function Scanner() {
     )
   }, [])
 
+  /**
+   * Proof-of-work: pin a thumbnail of the finished step for the report.
+   * Shared by voice step commands and the on-screen step buttons so the
+   * two paths can't drift; []-stable for the voice chain.
+   */
+  const pinStepPhoto = useCallback(
+    (step: number) => {
+      const { el } = frameTarget()
+      if (!el) return
+      const shot = captureThumbnail(el)
+      if (shot) {
+        setStepPhotos((prev) => ({ ...prev, [step]: shot }))
+        logInfo('photo', `checkpoint pinned to step ${step + 1}`)
+      }
+    },
+    [frameTarget],
+  )
+
   // Identity must stay stable (all deps []-stable): the voice effect
   // resubscribes on change, which would recreate the recognizer mid-listen.
   const handlePhrase = useCallback(async (phrase: string) => {
@@ -794,13 +820,7 @@ export default function Scanner() {
         setStepIndex(next)
         // Proof-of-work: pin a thumbnail to the step just finished. Back and
         // repeat re-read without producing evidence.
-        if (command === 'next') {
-          const shot = captureThumbnail(el)
-          if (shot) {
-            setStepPhotos((prev) => ({ ...prev, [current]: shot }))
-            logInfo('photo', `checkpoint pinned to step ${current + 1}`)
-          }
-        }
+        if (command === 'next') pinStepPhoto(current)
         const step = card.steps[next]
         const finished = command === 'next' && current === count - 1
         const line = finished
@@ -932,7 +952,7 @@ export default function Scanner() {
       pendingRef.current = null
       if (next) void handlePhrase(next)
     }
-  }, [draw, armRefresh, frameTarget, requestGuidance, requestGuides, speakReply])
+  }, [draw, armRefresh, frameTarget, pinStepPhoto, requestGuidance, requestGuides, speakReply])
 
   /**
    * Shared tap/circle outline tail: numbered badge, overlay, memory,
@@ -1245,7 +1265,11 @@ export default function Scanner() {
 
   const changeStep = (index: number) => {
     const count = guidance?.steps.length ?? 0
-    setStepIndex(count > 0 ? Math.min(Math.max(0, index), count - 1) : 0)
+    const next = count > 0 ? Math.min(Math.max(0, index), count - 1) : 0
+    // Buttons match voice: moving forward pins the finished step, Back
+    // re-reads without producing evidence.
+    if (next > stepIndex) pinStepPhoto(stepIndex)
+    setStepIndex(next)
   }
   const clearOverlay = () => {
     resetOverlays()

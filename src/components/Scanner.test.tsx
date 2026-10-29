@@ -971,6 +971,73 @@ describe('Scanner', () => {
     }
   })
 
+  it('pins a photo checkpoint when advancing steps with the Next Step button', async () => {
+    const restoreCanvas = mockCanvas2d()
+    try {
+      mockCamera(true)
+      vi.mocked(reasonSpatial).mockResolvedValue({
+        target_label: 'Belt',
+        approx_x: 10,
+        approx_y: 10,
+        speech_response: null,
+        display_mode: 'visual_only',
+      })
+      vi.mocked(fetchGuidance).mockResolvedValue(validGuidanceFixture)
+      const captured = captureDownload()
+      const { container } = render(<Scanner />)
+      setVideoDims(container)
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('show belt')
+      })
+      expect(await screen.findByText('Remove the belt cover')).toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: 'Next Step' }))
+      expect(await screen.findByText('Step 2 of 3')).toBeInTheDocument()
+      openOverflow()
+      fireEvent.click(screen.getByText('Export Report'))
+      await waitFor(() => expect(captured.blob).not.toBeNull())
+      await expect(captured.blob?.text()).resolves.toContain(
+        '<img alt="Step 1 photo" src="data:image/jpeg;base64,">',
+      )
+    } finally {
+      restoreCanvas()
+    }
+  })
+
+  it('pins no photo when stepping back with the button', async () => {
+    const restoreCanvas = mockCanvas2d()
+    try {
+      mockCamera(true)
+      vi.mocked(reasonSpatial).mockResolvedValue({
+        target_label: 'Belt',
+        approx_x: 10,
+        approx_y: 10,
+        speech_response: null,
+        display_mode: 'visual_only',
+      })
+      vi.mocked(fetchGuidance).mockResolvedValue(validGuidanceFixture)
+      const captured = captureDownload()
+      const { container } = render(<Scanner />)
+      setVideoDims(container)
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('show belt')
+      })
+      expect(await screen.findByText('Remove the belt cover')).toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: 'Next Step' }))
+      expect(await screen.findByText('Step 2 of 3')).toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: 'Back' }))
+      expect(await screen.findByText('Step 1 of 3')).toBeInTheDocument()
+      openOverflow()
+      fireEvent.click(screen.getByText('Export Report'))
+      await waitFor(() => expect(captured.blob).not.toBeNull())
+      const text = (await captured.blob?.text()) ?? ''
+      // Forward pinned step 1; stepping back adds no second photo.
+      expect(text.match(/<img alt="Step \d+ photo"/g)).toHaveLength(1)
+      expect(text).toContain('<img alt="Step 1 photo"')
+    } finally {
+      restoreCanvas()
+    }
+  })
+
   it('keeps gathered steps in the report after Clear AR View', async () => {
     mockCamera(true)
     vi.mocked(reasonSpatial).mockResolvedValue({
@@ -3189,6 +3256,106 @@ describe('Scanner freeze frame', () => {
         { x: 480, y: 240, width: 640, height: 480 },
       )
     } finally {
+      media.restore()
+    }
+  })
+
+  it('counter-flips badge glyphs on the mirrored desktop canvas', async () => {
+    vi.mocked(useDesktopLayout).mockReturnValue(true)
+    mockCamera(true)
+    const media = mockMediaControls()
+    const calls: Array<[string, unknown[]]> = []
+    const ctx = new Proxy(
+      { marker: 'ctx' },
+      {
+        get: (target, prop) => {
+          if (prop === 'createImageData') {
+            return (w: number, h: number) => ({
+              data: new Uint8ClampedArray(w * h * 4),
+              width: w,
+              height: h,
+            })
+          }
+          if (prop === 'measureText') {
+            return () => ({ width: 12 })
+          }
+          if (typeof prop !== 'string') return undefined
+          const value = (target as Record<PropertyKey, unknown>)[prop]
+          if (typeof value !== 'undefined') return value
+          return (...args: unknown[]) => {
+            calls.push([prop, args])
+          }
+        },
+        set: () => true,
+      },
+    )
+    const ctxSpy = vi
+      .spyOn(window.HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue(ctx as unknown as CanvasRenderingContext2D)
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      const layer = tapTarget()
+      setTapRect(layer, { left: 0, top: 0, width: 320, height: 240 })
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 80, clientY: 120 })
+      })
+      // The badge still draws, but mirrored in backing-store pixels so the
+      // CSS flip restores readable glyphs on screen.
+      expect(calls).toContainEqual(['fillText', ['1', expect.any(Number), expect.any(Number)]])
+      expect(calls).toContainEqual(['translate', [expect.any(Number), 0]])
+      expect(calls).toContainEqual(['scale', [-1, 1]])
+    } finally {
+      ctxSpy.mockRestore()
+      media.restore()
+    }
+  })
+
+  it('paints badge glyphs unflipped on the unmirrored canvas', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    const calls: Array<[string, unknown[]]> = []
+    const ctx = new Proxy(
+      { marker: 'ctx' },
+      {
+        get: (target, prop) => {
+          if (prop === 'createImageData') {
+            return (w: number, h: number) => ({
+              data: new Uint8ClampedArray(w * h * 4),
+              width: w,
+              height: h,
+            })
+          }
+          if (prop === 'measureText') {
+            return () => ({ width: 12 })
+          }
+          if (typeof prop !== 'string') return undefined
+          const value = (target as Record<PropertyKey, unknown>)[prop]
+          if (typeof value !== 'undefined') return value
+          return (...args: unknown[]) => {
+            calls.push([prop, args])
+          }
+        },
+        set: () => true,
+      },
+    )
+    const ctxSpy = vi
+      .spyOn(window.HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue(ctx as unknown as CanvasRenderingContext2D)
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      const layer = tapTarget()
+      setTapRect(layer, { left: 0, top: 0, width: 320, height: 240 })
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 80, clientY: 120 })
+      })
+      expect(calls).toContainEqual(['fillText', ['1', expect.any(Number), expect.any(Number)]])
+      expect(calls).not.toContainEqual(['scale', [-1, 1]])
+    } finally {
+      ctxSpy.mockRestore()
       media.restore()
     }
   })
