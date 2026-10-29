@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { CHEVRON_DOWN, CHEVRON_UP, EXPAND_CORNERS, Icon, SHRINK_CORNERS } from './Icon'
 import type { GuidanceResult } from '../types'
 import { ifixitSearchUrl, type FixitGuide } from '../services/ifixitApi'
 
@@ -10,6 +11,11 @@ interface HudCardProps {
   onScanAnother: () => void
   /** iFixit guide hits; undefined while loading, empty when none found. */
   guides?: FixitGuide[]
+  /**
+   * Show the minimize/maximize/restore buttons. Hosts that force full
+   * height (desktop sidebar) pass false — the modes are dock affordances.
+   */
+  sizingControls?: boolean
 }
 
 const SHELL = 'w-full rounded-2xl bg-black/80 backdrop-blur-md p-4 flex flex-col gap-3'
@@ -19,29 +25,6 @@ type CardMode = 'normal' | 'minimized' | 'maximized'
 
 const ICON_BUTTON =
   'min-h-[48px] min-w-[48px] shrink-0 rounded-lg bg-white/15 text-white active:scale-95 transition flex items-center justify-center'
-
-/** Stroke icon; the accessible name always comes from the owning button. */
-function Icon({ d }: { d: string }) {
-  return (
-    <svg
-      aria-hidden="true"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2.5}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className="h-6 w-6"
-    >
-      <path d={d} />
-    </svg>
-  )
-}
-
-const CHEVRON_UP = 'M18 15l-6-6-6 6'
-const CHEVRON_DOWN = 'M6 9l6 6 6-6'
-const EXPAND_CORNERS = 'M4 9V4h5 M20 9V4h-5 M4 15v5h5 M20 15v5h-5'
-const SHRINK_CORNERS = 'M9 4v5H4 M15 4v5h5 M9 20v-5H4 M15 20v-5h5'
 
 function SkeletonCard() {
   return (
@@ -76,6 +59,7 @@ export default function HudCard({
   onStepChange,
   onScanAnother,
   guides,
+  sizingControls = true,
 }: HudCardProps) {
   const [mode, setMode] = useState<CardMode>('normal')
   // A fresh scan always re-opens the card at normal size; step changes
@@ -93,7 +77,7 @@ export default function HudCard({
   const safeIndex = steps.length > 0 ? Math.min(Math.max(0, stepIndex), steps.length - 1) : 0
   const step = steps[safeIndex]
 
-  if (mode === 'minimized') {
+  if (mode === 'minimized' && sizingControls) {
     return (
       <section aria-label="Repair guidance" className="w-full rounded-2xl bg-black/80 backdrop-blur-md px-4 py-2">
         <div className="flex items-center gap-2">
@@ -130,16 +114,18 @@ export default function HudCard({
           <h2 className="min-w-0 flex-1 text-xl font-bold tracking-tight text-white">
             {guidance.title}
           </h2>
-          <button
-            type="button"
-            onClick={() => setMode('minimized')}
-            aria-expanded={true}
-            aria-label="Minimize steps"
-            className={ICON_BUTTON}
-          >
-            <Icon d={CHEVRON_DOWN} />
-          </button>
-          {maximized ? (
+          {sizingControls && (
+            <button
+              type="button"
+              onClick={() => setMode('minimized')}
+              aria-expanded={true}
+              aria-label="Minimize steps"
+              className={ICON_BUTTON}
+            >
+              <Icon d={CHEVRON_DOWN} />
+            </button>
+          )}
+          {sizingControls && (maximized ? (
             <button
               type="button"
               onClick={() => setMode('normal')}
@@ -159,7 +145,7 @@ export default function HudCard({
             >
               <Icon d={EXPAND_CORNERS} />
             </button>
-          )}
+          ))}
         </div>
 
         {step ? (

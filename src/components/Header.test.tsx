@@ -45,9 +45,18 @@ describe('Header', () => {
   it('renders brand, status, and LIVE/facing badges', () => {
     renderHeader({ status: 'listening' })
     expect(screen.getByText('WRENCHMIND')).toBeInTheDocument()
-    expect(screen.getByText('[ 🟢 LISTENING... ]')).toBeInTheDocument()
+    expect(screen.getByText('Listening')).toBeInTheDocument()
     expect(screen.getByText('LIVE')).toBeInTheDocument()
     expect(screen.getByText('REAR CAMERA')).toBeInTheDocument()
+  })
+
+  it('hides the hint pill while the overflow menu is open', () => {
+    renderHeader({ hint: 'Drag to circle a part' })
+    expect(screen.getByText('Drag to circle a part')).toBeInTheDocument()
+    openOverflow()
+    expect(screen.queryByText('Drag to circle a part')).not.toBeInTheDocument()
+    openOverflow()
+    expect(screen.getByText('Drag to circle a part')).toBeInTheDocument()
   })
 
   it('holds the voice toggle and QR behind the overflow', () => {
@@ -142,16 +151,17 @@ describe('Header', () => {
     expect(screen.queryByRole('button', { name: 'Flashlight' })).not.toBeInTheDocument()
   })
 
-  it('renders quick toggles with exact names, hidden glyphs, and 48px targets', () => {
+  it('renders quick toggles with exact names, hidden icons, and 48px targets', () => {
     renderHeader({ hasTorch: true })
     const freeze = screen.getByRole('button', { name: 'Freeze frame' })
     expect(freeze).toHaveClass('min-h-[48px]', 'min-w-[48px]')
     expect(freeze).toHaveAttribute('aria-pressed', 'false')
     expect(freeze).toHaveClass('bg-white/10', 'text-white')
-    expect(freeze.querySelector('[aria-hidden="true"]')).toHaveTextContent('⏸')
+    expect(freeze.querySelector('[aria-hidden="true"]')?.tagName).toBe('svg')
     const torch = screen.getByRole('button', { name: 'Flashlight' })
     expect(torch).toHaveClass('min-h-[48px]', 'min-w-[48px]')
-    expect(torch.querySelector('[aria-hidden="true"]')).toHaveTextContent('🔦')
+    expect(torch.querySelector('[aria-hidden="true"]')?.tagName).toBe('svg')
+    expect(screen.getByRole('button', { name: 'More options' }).querySelector('svg')).toBeInTheDocument()
   })
 
   it('shows the freeze quick toggle in the top bar when live', () => {

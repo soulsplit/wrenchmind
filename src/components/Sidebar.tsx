@@ -43,6 +43,7 @@ export default function Sidebar({
           onStepChange={onStepChange}
           onScanAnother={onScanAnother}
           guides={guides}
+          sizingControls={false}
         />
       ) : (
         <div className="flex flex-1 flex-col items-center justify-center gap-2 rounded-2xl border border-white/10 bg-black/80 p-6 text-center">

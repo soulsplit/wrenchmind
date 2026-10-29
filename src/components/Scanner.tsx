@@ -37,6 +37,7 @@ import { cancelSpeech, speakText } from '../services/speechOutput'
 import { fetchGuidance } from '../services/guidanceApi'
 import { buildQuery, searchGuides, type FixitGuide } from '../services/ifixitApi'
 import { downloadReport, shareReport } from '../services/report'
+import type { ProcedureSnapshot } from '../services/report'
 import { VoiceAssistant } from '../services/voiceAssistant'
 import {
   describeCameraError,
@@ -152,6 +153,19 @@ const TRACE_POINT_GAP = 2
 const TRACE_MAX_POINTS = 1000
 /** Fraction of the frame's short side used for the tap fallback crop. */
 const FALLBACK_CROP_FRACTION = 0.25
+/**
+ * Rotating coach-mark hints for the badge row; index 0 is the primary
+ * gesture hint. Rotation (not stacking) keeps one-line chrome while
+ * teaching long-press remove, the 1x circle rule, and voice discovery.
+ */
+const HINTS = [
+  'Drag to circle a part · tap to identify',
+  'Hold an outline to remove it',
+  'Pinch back to 1x to circle a part',
+  'Voice mode lives in the ⋯ menu',
+]
+/** Coach-mark rotation cadence while the feed is usable. */
+const HINT_ROTATE_MS = 8000
 
 /** Largest mask by box area; null when SAM returns none. */
 function largestMask(recs: MaskRecord[]): MaskRecord | null {
@@ -243,6 +257,7 @@ export default function Scanner() {
   const [stillUrl, setStillUrl] = useState<string | null>(null)
   /** Bumped on unfreeze to re-acquire the camera via the camera effect. */
   const [restartKey, setRestartKey] = useState(0)
+  const [hintIndex, setHintIndex] = useState(0)
   const [zoom, setZoom] = useState<ZoomState>(NO_ZOOM)
   const zoomRef = useRef(zoom)
   zoomRef.current = zoom
@@ -257,6 +272,8 @@ export default function Scanner() {
   // without re-subscribing the voice lifecycle effect.
   const guidanceRef = useRef<GuidanceResult | null>(null)
   guidanceRef.current = guidance
+  /** Session procedure history for the report; appended on replace/clear, never reset. */
+  const guidanceHistoryRef = useRef<ProcedureSnapshot[]>([])
   const stepIndexRef = useRef(0)
   stepIndexRef.current = stepIndex
   const [emptyTarget, setEmptyTarget] = useState(false)
@@ -499,6 +516,18 @@ export default function Scanner() {
     }
   }, [facing, restartKey, stopTracks])
 
+  // Rotate the badge-row hint while the feed is usable so secondary
+  // gestures (long-press remove, 1x circle rule, voice mode) surface
+  // without permanent chrome.
+  useEffect(() => {
+    if (!frozen && !cameraLive) return
+    const timer = window.setInterval(
+      () => setHintIndex((i) => (i + 1) % HINTS.length),
+      HINT_ROTATE_MS,
+    )
+    return () => window.clearInterval(timer)
+  }, [frozen, cameraLive])
+
   // Reconcile the canvas backing store when the stream's dimensions
   // arrive or change: draw() sizes from videoWidth/Height, and every
   // overlay mutation already calls draw() directly, so no polling loop is
@@ -662,6 +691,18 @@ export default function Scanner() {
     await speakText(text)
   }, [])
 
+  /**
+   * File the live procedure into session history before it is replaced or
+   * cleared; the report renders these as earlier procedures. Refs only, so
+   * the identity stays []-stable for the requestGuidance chain.
+   */
+  const snapshotGuidance = useCallback(() => {
+    const current = guidanceRef.current
+    if (current) {
+      guidanceHistoryRef.current.push({ guidance: current, stepIndex: stepIndexRef.current })
+    }
+  }, [])
+
   const requestGuidance = useCallback((label: string, phrase: string, context: string) => {
     guidanceReqRef.current += 1
     const reqId = guidanceReqRef.current
@@ -669,6 +710,7 @@ export default function Scanner() {
     void fetchGuidance(label, phrase, context).then(
       (result) => {
         if (guidanceReqRef.current !== reqId) return
+        snapshotGuidance()
         setGuidance(result)
         setStepIndex(0)
         setStepPhotos({})
@@ -681,7 +723,7 @@ export default function Scanner() {
     ).finally(() => {
       if (guidanceReqRef.current === reqId) setGuidancePending(false)
     })
-  }, [])
+  }, [snapshotGuidance])
 
   /**
    * Fetch iFixit guides alongside guidance. Fire-and-forget like guidance:
@@ -1177,6 +1219,7 @@ export default function Scanner() {
     setEmptyTarget(false)
     // Invalidate any in-flight guidance fetch and drop the HUD card.
     guidanceReqRef.current += 1
+    snapshotGuidance()
     setGuidance(null)
     setGuidancePending(false)
     setStepIndex(0)
@@ -1205,6 +1248,7 @@ export default function Scanner() {
       workingOn,
       findings,
       photos,
+      history: [...guidanceHistoryRef.current],
     }
     // Prefer the OS share sheet; download when sharing is unavailable
     // or the user dismisses it.
@@ -1539,7 +1583,7 @@ export default function Scanner() {
         onTorchToggle={(next) => void toggleTorch(next)}
         frozen={frozen}
         onFreezeToggle={(next) => setFrozenMode(next)}
-        hint={(frozen || cameraLive) ? 'Drag to circle a part · tap to identify' : null}
+        hint={(frozen || cameraLive) ? HINTS[hintIndex % HINTS.length] : null}
       />
       {/*
         Bottom dock: error toast, HUD card, and thumb-reachable query input
@@ -1565,6 +1609,19 @@ export default function Scanner() {
               className="motion-safe:animate-pulse inline-block h-2.5 w-2.5 shrink-0 rounded-full bg-red-500"
             />
             <p className="flex-1 min-w-0 text-sm font-medium text-white">{error}</p>
+            {!cameraLive && !frozen && (
+              <button
+                type="button"
+                onClick={() => {
+                  setError('')
+                  setRestartKey((k) => k + 1)
+                }}
+                aria-label="Try camera again"
+                className="min-h-[48px] shrink-0 rounded-lg bg-white/15 px-4 text-base font-bold text-white active:scale-95 transition"
+              >
+                Retry
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setError('')}
@@ -1627,6 +1684,20 @@ export default function Scanner() {
             <span className="motion-safe:animate-pulse inline-block h-2 w-2 rounded-full bg-cyan-300" />
             Analyzing…
           </div>
+        )}
+        {/*
+          Zoom orientation: the +/- controls were deliberately removed, so
+          this chip is the only zoom readout and the only way back to 1x.
+        */}
+        {zoom.scale > 1.01 && (
+          <button
+            type="button"
+            onClick={() => setZoom(NO_ZOOM)}
+            aria-label={`Reset zoom (currently ${zoom.scale.toFixed(1)}x)`}
+            className="self-center inline-flex items-center gap-2 rounded-full bg-black/70 px-3 py-1.5 text-xs font-semibold text-white active:scale-95 transition"
+          >
+            {zoom.scale.toFixed(1)}× · tap to reset
+          </button>
         )}
         {findings.length > 0 && (
           <div

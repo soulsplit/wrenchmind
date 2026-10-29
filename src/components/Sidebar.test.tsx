@@ -97,6 +97,14 @@ describe('Sidebar', () => {
     expect(screen.queryByText('No part scanned yet')).not.toBeInTheDocument()
   })
 
+  it('hides card sizing controls (the panel is always full height)', () => {
+    renderSidebar(validGuidanceFixture)
+    expect(screen.queryByRole('button', { name: 'Minimize steps' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Maximize steps' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Restore steps' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Expand steps' })).not.toBeInTheDocument()
+  })
+
   it('shows the idle placeholder when there is no guidance', () => {
     renderSidebar(null)
     expect(screen.getByText('No part scanned yet')).toBeInTheDocument()

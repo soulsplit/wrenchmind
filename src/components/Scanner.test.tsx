@@ -464,6 +464,17 @@ describe('Scanner', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Camera access denied')
   })
 
+  it('retries camera acquisition from the error toast', async () => {
+    const gum = mockCamera(false)
+    render(<Scanner />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('Camera access denied')
+    const attempts = gum.mock.calls.length
+    expect(attempts).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Try camera again' }))
+    await waitFor(() => expect(gum.mock.calls.length).toBeGreaterThan(attempts))
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+  })
+
   it('names the real cause when getUserMedia rejects with a named error', async () => {
     Object.defineProperty(navigator, 'mediaDevices', {
       value: {
@@ -510,7 +521,7 @@ describe('Scanner', () => {
     openOverflow()
     const toggle = screen.getByRole('switch', { name: 'Voice mode' })
     fireEvent.click(toggle)
-    expect(await screen.findByText('[ 🟢 LISTENING... ]')).toBeInTheDocument()
+    expect(await screen.findByText('Listening')).toBeInTheDocument()
     expect(assistants[0].start).toHaveBeenCalledTimes(1)
     openOverflow()
     fireEvent.click(screen.getByRole('switch', { name: 'Voice mode' }))
@@ -525,7 +536,7 @@ describe('Scanner', () => {
     render(<Scanner />)
     openOverflow()
     fireEvent.click(screen.getByRole('switch', { name: 'Voice mode' }))
-    await screen.findByText('[ 🟢 LISTENING... ]')
+    await screen.findByText('Listening')
     act(() => {
       assistants[0].callbacks.onError('Microphone access denied')
     })
@@ -922,6 +933,85 @@ describe('Scanner', () => {
       )
     } finally {
       restoreCanvas()
+    }
+  })
+
+  it('keeps gathered steps in the report after Clear AR View', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Belt',
+      approx_x: 10,
+      approx_y: 10,
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    vi.mocked(fetchGuidance).mockResolvedValue(validGuidanceFixture)
+    const captured = captureDownload()
+    const { container } = render(<Scanner />)
+    setVideoDims(container)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show belt')
+    })
+    expect(await screen.findByText('Remove the belt cover')).toBeInTheDocument()
+    openOverflow()
+    fireEvent.click(screen.getByText('Clear AR View'))
+    expect(screen.queryByText('Remove the belt cover')).not.toBeInTheDocument()
+    openOverflow()
+    fireEvent.click(screen.getByText('Export Report'))
+    await waitFor(() => expect(captured.blob).not.toBeNull())
+    const text = (await captured.blob?.text()) ?? ''
+    expect(text).toContain('<h2>Earlier this session</h2>')
+    expect(text).toContain('<h2>MID-DRIVE DRIVE BELT</h2>')
+    expect(text).toContain('[&gt;] Step 1: Remove the belt cover')
+    expect(text).not.toContain('No repair guidance was generated this session.')
+  })
+
+  it('exports both procedures when a new scan supersedes the last', async () => {
+    const media = mockMediaControls()
+    try {
+      mockCamera(true)
+      vi.mocked(reasonSpatial).mockResolvedValue({
+        target_label: 'Belt',
+        approx_x: 10,
+        approx_y: 10,
+        speech_response: null,
+        display_mode: 'visual_only',
+      })
+      const alternator = {
+        ...validGuidanceFixture,
+        title: 'ALTERNATOR BELT',
+        steps: [{ title: 'Loosen pivot bolt', detail: 'Crack it, do not remove.' }],
+      }
+      vi.mocked(fetchGuidance).mockResolvedValueOnce(validGuidanceFixture).mockResolvedValueOnce(alternator)
+      const captured = captureDownload()
+      const { container } = render(<Scanner />)
+      setVideoDims(container)
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('show belt')
+      })
+      expect(await screen.findByText('Remove the belt cover')).toBeInTheDocument()
+      // Unfreezing releases the tracking lock while keeping guidance, so the
+      // next phrase fetches fresh guidance that supersedes the first.
+      await screen.findByText('LIVE')
+      pressFreezeFrame()
+      expect(await screen.findByText('FROZEN')).toBeInTheDocument()
+      pressFreezeFrame()
+      await screen.findByText('LIVE')
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('show alternator')
+      })
+      expect(await screen.findByText('Loosen pivot bolt')).toBeInTheDocument()
+      openOverflow()
+      fireEvent.click(screen.getByText('Export Report'))
+      await waitFor(() => expect(captured.blob).not.toBeNull())
+      const text = (await captured.blob?.text()) ?? ''
+      expect(text).toContain('<h2>ALTERNATOR BELT</h2>')
+      expect(text).toContain('<h2>Earlier this session</h2>')
+      expect(text).toContain('<h2>MID-DRIVE DRIVE BELT</h2>')
+      expect(text).toContain('[&gt;] Step 1: Loosen pivot bolt')
+      expect(text).toContain('[&gt;] Step 1: Remove the belt cover')
+    } finally {
+      media.restore()
     }
   })
 
@@ -1501,7 +1591,7 @@ describe('Scanner', () => {
       await act(async () => {
         fireEvent.click(screen.getByRole('switch', { name: 'Voice mode' }))
       })
-      expect(screen.getByText('[ 🟢 LISTENING... ]')).toBeInTheDocument()
+      expect(screen.getByText('Listening')).toBeInTheDocument()
       await act(async () => {
         assistants[0].callbacks.onPhrase('show screws')
       })
@@ -1673,16 +1763,16 @@ describe('Scanner', () => {
     render(<Scanner />)
     openOverflow()
     fireEvent.click(screen.getByRole('switch', { name: 'Voice mode' }))
-    await screen.findByText('[ 🟢 LISTENING... ]')
+    await screen.findByText('Listening')
     await act(async () => {
       assistants[0].callbacks.onPhrase('go')
     })
     expect(speakText).toHaveBeenCalledWith('done')
-    expect(await screen.findByText('[ 🔊 SPEAKING... ]')).toBeInTheDocument()
+    expect(await screen.findByText('Speaking')).toBeInTheDocument()
     await act(async () => {
       releaseSpeak()
     })
-    expect(await screen.findByText('[ 🟢 LISTENING... ]')).toBeInTheDocument()
+    expect(await screen.findByText('Listening')).toBeInTheDocument()
   })
 
   it('stays silent with voice mode off', async () => {
@@ -1700,7 +1790,7 @@ describe('Scanner', () => {
     })
     expect(await screen.findByText('Screw')).toBeInTheDocument()
     expect(speakText).not.toHaveBeenCalled()
-    expect(screen.queryByText('[ 🔊 SPEAKING... ]')).not.toBeInTheDocument()
+    expect(screen.queryByText('Speaking')).not.toBeInTheDocument()
   })
 
   it('step commands advance silently with voice mode off', async () => {
@@ -1843,7 +1933,7 @@ describe('Scanner', () => {
     await act(async () => {
       assistants[0].callbacks.onPhrase('go')
     })
-    expect(await screen.findByText('[ ⚠ ERROR ]')).toBeInTheDocument()
+    expect(await screen.findByText('Error')).toBeInTheDocument()
   })
 
   it('ignores phrases after unmount', async () => {
@@ -2049,11 +2139,11 @@ describe('Scanner', () => {
     render(<Scanner />)
     openOverflow()
     fireEvent.click(screen.getByRole('switch', { name: 'Voice mode' }))
-    await screen.findByText('[ 🟢 LISTENING... ]')
+    await screen.findByText('Listening')
     await act(async () => {
       assistants[0].callbacks.onPhrase('show screws')
     })
-    expect(await screen.findByText('[ ⚠ ERROR ]')).toBeInTheDocument()
+    expect(await screen.findByText('Error')).toBeInTheDocument()
   })
 
   it('fetches guidance alongside segmentation and renders the HUD card', async () => {
@@ -2971,7 +3061,7 @@ describe('Scanner freeze frame', () => {
       setVideoDims(container, 640, 480)
       openOverflow()
       fireEvent.click(screen.getByRole('switch', { name: 'Voice mode' }))
-      expect(await screen.findByText('[ 🟢 LISTENING... ]')).toBeInTheDocument()
+      expect(await screen.findByText('Listening')).toBeInTheDocument()
       await waitForLive()
       pressFreezeFrame()
       const layer = tapTarget()
@@ -2983,11 +3073,11 @@ describe('Scanner freeze frame', () => {
       await act(async () => {
         releaseMasks([maskRecord({ x1: 300, y1: 200, x2: 340, y2: 240, w: 41, h: 41 })])
       })
-      expect(await screen.findByText('[ 🔊 SPEAKING... ]')).toBeInTheDocument()
+      expect(await screen.findByText('Speaking')).toBeInTheDocument()
       await act(async () => {
         releaseSpeak()
       })
-      expect(await screen.findByText('[ 🟢 LISTENING... ]')).toBeInTheDocument()
+      expect(await screen.findByText('Listening')).toBeInTheDocument()
     } finally {
       media.restore()
     }
@@ -3242,6 +3332,36 @@ describe('Scanner freeze frame', () => {
       expect(screen.getByText('Drag to circle a part · tap to identify')).toBeInTheDocument()
     } finally {
       media.restore()
+    }
+  })
+
+  it('rotates coach-mark hints every 8 seconds while live', async () => {
+    vi.useFakeTimers()
+    const media = mockMediaControls()
+    try {
+      mockCamera(true)
+      render(<Scanner />)
+      await waitForLive()
+      expect(screen.getByText('Drag to circle a part · tap to identify')).toBeInTheDocument()
+      await act(async () => {
+        vi.advanceTimersByTime(8000)
+      })
+      expect(screen.getByText('Hold an outline to remove it')).toBeInTheDocument()
+      await act(async () => {
+        vi.advanceTimersByTime(8000)
+      })
+      expect(screen.getByText('Pinch back to 1x to circle a part')).toBeInTheDocument()
+      await act(async () => {
+        vi.advanceTimersByTime(8000)
+      })
+      expect(screen.getByText('Voice mode lives in the ⋯ menu')).toBeInTheDocument()
+      await act(async () => {
+        vi.advanceTimersByTime(8000)
+      })
+      expect(screen.getByText('Drag to circle a part · tap to identify')).toBeInTheDocument()
+    } finally {
+      media.restore()
+      vi.useRealTimers()
     }
   })
 
@@ -3793,6 +3913,18 @@ describe('Scanner zoom', () => {
     render(<Scanner />)
     wheelZoomIn(8)
     expect(stageStyle()).toContain('scale(4)')
+  })
+
+  it('shows a zoom chip that resets to 1x when tapped', () => {
+    mockCamera(true)
+    render(<Scanner />)
+    expect(screen.queryByRole('button', { name: /Reset zoom/ })).not.toBeInTheDocument()
+    wheelZoomIn()
+    const chip = screen.getByRole('button', { name: 'Reset zoom (currently 1.2x)' })
+    expect(chip).toHaveTextContent('1.2× · tap to reset')
+    fireEvent.click(chip)
+    expect(stageStyle()).toContain('scale(1)')
+    expect(screen.queryByRole('button', { name: /Reset zoom/ })).not.toBeInTheDocument()
   })
 
   it('zooms at the cursor with the wheel and ignores ctrl-wheel', () => {

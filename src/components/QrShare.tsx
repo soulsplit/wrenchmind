@@ -98,12 +98,12 @@ export default function QrShare({ onOpen, onClose, hideTrigger = false }: QrShar
   }
 
   return (
-    <div className="flex flex-col items-start">
+    <div className="flex flex-col items-stretch w-full">
       {!hideTrigger && (
         <button
           type="button"
           onClick={openDialog}
-          className="min-h-[48px] bg-white/90 text-black px-4 py-2 rounded-lg font-bold shadow text-base active:scale-95 transition"
+          className="min-h-[48px] w-full bg-white/90 text-black px-4 py-2 rounded-lg font-bold shadow text-base active:scale-95 transition"
         >
           QR
         </button>

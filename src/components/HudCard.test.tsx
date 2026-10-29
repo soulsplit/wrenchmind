@@ -466,6 +466,22 @@ describe('HudCard sizing', () => {
     expect(screen.getByRole('button', { name: 'Maximize steps' })).toBeInTheDocument()
   })
 
+  it('hides sizing controls when the host opts out', () => {
+    render(
+      <HudCard
+        guidance={validGuidanceFixture}
+        pending={false}
+        stepIndex={0}
+        onStepChange={() => undefined}
+        onScanAnother={() => undefined}
+        sizingControls={false}
+      />,
+    )
+    expect(screen.queryByRole('button', { name: 'Minimize steps' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Maximize steps' })).not.toBeInTheDocument()
+    expect(screen.getByText('Remove the belt cover')).toBeInTheDocument()
+  })
+
   it('renders sizing controls as icons without text labels', () => {
     renderCard(validGuidanceFixture)
     for (const label of ['Minimize', 'Maximize']) {

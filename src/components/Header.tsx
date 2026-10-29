@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { Status } from '../types'
+import { Dots, FLASHLIGHT, Icon, PAUSE_BARS } from './Icon'
 import StatusBar from './StatusBar'
 import Toggle from './Toggle'
 import QrShare from './QrShare'
@@ -87,11 +88,11 @@ export default function Header({
             aria-label="Freeze frame"
             aria-pressed={frozen}
             onClick={() => onFreezeToggle(!frozen)}
-            className={`min-h-[48px] min-w-[48px] px-3 rounded-lg font-bold text-xl leading-none active:scale-95 transition ${
+            className={`min-h-[48px] min-w-[48px] px-3 rounded-lg flex items-center justify-center active:scale-95 transition ${
               frozen ? 'bg-green-500 text-white' : 'bg-white/10 text-white'
             }`}
           >
-            <span aria-hidden="true">⏸</span>
+            <Icon d={PAUSE_BARS} />
           </button>
         )}
         {hasTorch && !frozen && (
@@ -100,11 +101,11 @@ export default function Header({
             aria-label="Flashlight"
             aria-pressed={torchOn}
             onClick={() => onTorchToggle(!torchOn)}
-            className={`min-h-[48px] min-w-[48px] px-3 rounded-lg font-bold text-xl leading-none active:scale-95 transition ${
+            className={`min-h-[48px] min-w-[48px] px-3 rounded-lg flex items-center justify-center active:scale-95 transition ${
               torchOn ? 'bg-green-500 text-white' : 'bg-white/10 text-white'
             }`}
           >
-            <span aria-hidden="true">🔦</span>
+            <Icon d={FLASHLIGHT} />
           </button>
         )}
         <div className="flex-1" aria-hidden="true" />
@@ -113,16 +114,16 @@ export default function Header({
           onClick={() => setOverflowOpen((was) => !was)}
           aria-expanded={overflowOpen}
           aria-label="More options"
-          className="min-h-[48px] min-w-[48px] px-3 rounded-lg bg-white/10 text-white font-bold text-xl leading-none active:scale-95 transition"
+          className="min-h-[48px] min-w-[48px] px-3 rounded-lg bg-white/10 text-white flex items-center justify-center active:scale-95 transition"
         >
-          ⋯
+          <Dots />
         </button>
       </div>
       {(overflowOpen || qrOpen) && (
         <div
           className={
             overflowOpen
-              ? 'absolute flex flex-col items-end gap-2 rounded-xl bg-black/90 border border-white/20 p-3'
+              ? 'absolute flex flex-col items-stretch gap-2 w-64 rounded-xl bg-black/90 border border-white/20 p-3'
               : undefined
           }
           style={
@@ -161,7 +162,7 @@ export default function Header({
                 closeOverflow()
               }}
               aria-label="Switch camera"
-              className="min-h-[48px] bg-white/90 text-black px-4 py-3 rounded-lg font-bold shadow text-base active:scale-95 transition"
+              className="min-h-[48px] w-full bg-white/90 text-black px-4 py-3 rounded-lg font-bold shadow text-base active:scale-95 transition"
             >
               Switch camera
             </button>
@@ -173,7 +174,7 @@ export default function Header({
                 onClearView()
                 closeOverflow()
               }}
-              className="min-h-[48px] bg-white/90 text-black px-4 py-3 rounded-lg font-bold shadow text-base active:scale-95 transition"
+              className="min-h-[48px] w-full bg-white/90 text-black px-4 py-3 rounded-lg font-bold shadow text-base active:scale-95 transition"
             >
               Clear AR View
             </button>
@@ -185,7 +186,7 @@ export default function Header({
                 onExportReport()
                 closeOverflow()
               }}
-              className="min-h-[48px] bg-white/90 text-black px-4 py-3 rounded-lg font-bold shadow text-base active:scale-95 transition"
+              className="min-h-[48px] w-full bg-white/90 text-black px-4 py-3 rounded-lg font-bold shadow text-base active:scale-95 transition"
             >
               Export Report
             </button>
@@ -237,7 +238,7 @@ export default function Header({
           </span>
         )}
         <StatusBar status={status} />
-        {hint && (
+        {hint && !overflowOpen && (
           <span className="inline-flex items-center rounded-full bg-black/70 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-cyan-200">
             {hint}
           </span>

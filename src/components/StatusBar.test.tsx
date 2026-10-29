@@ -5,9 +5,9 @@ import type { Status } from '../types'
 
 describe('StatusBar', () => {
   it.each<[Exclude<Status, 'analyzing' | 'off'>, string]>([
-    ['listening', '[ 🟢 LISTENING... ]'],
-    ['speaking', '[ 🔊 SPEAKING... ]'],
-    ['error', '[ ⚠ ERROR ]'],
+    ['listening', 'Listening'],
+    ['speaking', 'Speaking'],
+    ['error', 'Error'],
   ])('renders %s as %s', (status, label) => {
     render(<StatusBar status={status} />)
     const el = screen.getByRole('status')
