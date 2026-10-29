@@ -1,5 +1,6 @@
 import type { GuidanceResult, GuidanceSource, GuidanceSpec, GuidanceStep } from '../types'
 import { logError, logWarn } from './logger'
+import { cleanString, errorDetail, fetchWithTimeout, isRecord } from './http'
 
 const BASE = 'https://api.meta.ai/v1'
 const GUIDANCE_TIMEOUT_MS = 60000
@@ -18,36 +19,12 @@ export const UNKNOWN_SPEC_WARNING =
 export const UNGROUNDED_WARNING =
   'No repair manual could be retrieved — treat these steps as unverified guidance.'
 
+/**
+ * Raw API key; undefined when unset (callers rely on the pipeline's
+ * hasApiKey() gate — an unguarded call sends a literal "Bearer undefined").
+ */
 function key(): string {
   return import.meta.env.VITE_META_MODEL_API_KEY as string
-}
-
-/** Best-effort snippet of an HTTP error body for diagnosis (truncated). */
-async function errorDetail(res: Response): Promise<string> {
-  try {
-    const text = await res.text()
-    return text ? `: ${text.slice(0, 500)}` : ''
-  } catch {
-    return ''
-  }
-}
-
-async function fetchWithTimeout(
-  url: string,
-  init: RequestInit,
-  timeoutMs: number,
-  label: string,
-): Promise<Response> {
-  const controller = new AbortController()
-  const timer = setTimeout(() => {
-    logWarn('guidance', `${label} timed out after ${timeoutMs}ms`)
-    controller.abort()
-  }, timeoutMs)
-  try {
-    return await fetch(url, { ...init, signal: controller.signal })
-  } finally {
-    clearTimeout(timer)
-  }
 }
 
 /**
@@ -90,9 +67,8 @@ const GUIDANCE_SCHEMA = {
     tools: { type: 'array', items: { type: 'string' } },
     warnings: { type: 'array', items: { type: 'string' } },
     manualTitle: { type: ['string', 'null'] },
-    speechSummary: { type: 'string' },
   },
-  required: ['title', 'steps', 'specs', 'tools', 'warnings', 'manualTitle', 'speechSummary'],
+  required: ['title', 'steps', 'specs', 'tools', 'warnings', 'manualTitle'],
   additionalProperties: false,
 }
 
@@ -107,25 +83,13 @@ function buildGuidancePrompt(label: string, phrase: string, context: string): st
     'Read the top results and parse the best match as your grounding source.',
     '',
     'Then return STRICT JSON only (no markdown, no code fences, no commentary) with exactly this shape:',
-    '{"title": "PART OR JOB TITLE", "steps": [{"title": "short heading", "detail": "plain instructional prose", "warning": "step-local caution or null"}], "specs": [{"label": "...", "value": "..."}], "tools": ["..."], "warnings": ["at least one caution"], "manualTitle": "title of the manual you read, or null if none found", "speechSummary": "one plain-text paragraph, no markdown"}',
+    '{"title": "PART OR JOB TITLE", "steps": [{"title": "short heading", "detail": "plain instructional prose", "warning": "step-local caution or null"}], "specs": [{"label": "...", "value": "..."}], "tools": ["..."], "warnings": ["at least one caution"], "manualTitle": "title of the manual you read, or null if none found"}',
     '',
     'Rules:',
     '- specs: include ONLY values you actually found in the manual or a cited source. If a spec is unknown, emit "specs": [] and add a warnings entry telling the user to verify that spec against the manual. Never invent torque values, capacities, gaps, or part numbers.',
     '- warnings: always include at least one entry reminding the user to verify safety-critical steps and specs against the manual. Model-generated content is never authoritative.',
-    '- speechSummary: one plain-text paragraph summarizing the job and key cautions. No markdown, no bullets, no links.',
     '- No numeric confidence field anywhere. Do not state confidence percentages.',
   ].join('\n')
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null
-}
-
-/** Trimmed non-empty string, or null when the value is missing or blank. */
-function cleanString(value: unknown): string | null {
-  if (typeof value !== 'string') return null
-  const trimmed = value.trim()
-  return trimmed ? trimmed : null
 }
 
 /** Keep well-formed string entries; drop everything else. */
@@ -164,21 +128,6 @@ function cleanSpecs(value: unknown): GuidanceSpec[] {
     out.push({ label, value: specValue })
   }
   return out
-}
-
-/** Markdown constructs forbidden in the plain-text speechSummary field. */
-const MARKDOWN_RE =
-  /(\*\*|__|`|^#{1,6}\s|!?\[[^\]]*\]\([^)]*\)|^\s*[-*+]\s+|^\s*\d+[.)]\s+)/m
-/** Single-asterisk emphasis, e.g. *not* — literal `a * b` math is unaffected. */
-const EMPHASIS_RE = /(^|[\s(>])\*[A-Za-z][^*]*\*/
-
-function cleanSpeechSummary(value: unknown): string {
-  const text = cleanString(value)
-  if (!text) throw new Error('Guidance response contained no speech summary')
-  if (MARKDOWN_RE.test(text) || EMPHASIS_RE.test(text)) {
-    throw new Error('Guidance speechSummary contains markdown')
-  }
-  return text.replace(/\s+/g, ' ')
 }
 
 function responseItems(data: unknown): Array<Record<string, unknown>> {
@@ -284,7 +233,6 @@ function validateGuidance(
     warnings,
     sources,
     manualTitle,
-    speechSummary: cleanSpeechSummary(payload['speechSummary']),
   }
 }
 
@@ -323,8 +271,7 @@ export async function fetchGuidance(
         },
       }),
     },
-    GUIDANCE_TIMEOUT_MS,
-    'guidance',
+    { timeoutMs: GUIDANCE_TIMEOUT_MS, tag: 'guidance', label: 'guidance' },
   )
   if (!res.ok) {
     const suffix = await errorDetail(res)

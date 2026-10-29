@@ -29,6 +29,18 @@ function openOverflow() {
   fireEvent.click(screen.getByRole('button', { name: 'More options' }))
 }
 
+function expectMenuOpen() {
+  expect(screen.getByRole('button', { name: 'More options' })).toHaveAttribute('aria-expanded', 'true')
+  expect(screen.getByRole('switch', { name: 'Voice mode' })).toBeInTheDocument()
+}
+
+function expectMenuClosed() {
+  expect(screen.getByRole('button', { name: 'More options' })).toHaveAttribute('aria-expanded', 'false')
+  expect(screen.queryByRole('switch', { name: 'Voice mode' })).not.toBeInTheDocument()
+  expect(screen.queryByText('Logs')).not.toBeInTheDocument()
+  expect(screen.queryByText('Hide Logs')).not.toBeInTheDocument()
+}
+
 describe('Header', () => {
   it('renders brand, status, and LIVE/facing badges', () => {
     renderHeader({ status: 'listening' })
@@ -104,25 +116,80 @@ describe('Header', () => {
     expect(screen.getByText('Export Report')).toBeInTheDocument()
   })
 
-  it('shows the flashlight toggle only with torch support', () => {
+  it('shows the flashlight quick toggle in the top bar only with torch support', () => {
     renderHeader()
-    openOverflow()
-    expect(screen.queryByRole('switch', { name: 'Flashlight' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Flashlight' })).not.toBeInTheDocument()
   })
 
-  it('wires the flashlight toggle to its callback', () => {
+  it('wires the flashlight quick toggle to its callback', () => {
     const props = renderHeader({ hasTorch: true })
-    openOverflow()
-    const toggle = screen.getByRole('switch', { name: 'Flashlight' })
-    expect(toggle).not.toBeChecked()
+    // Visible without opening the overflow: it lives in the top bar.
+    const toggle = screen.getByRole('button', { name: 'Flashlight' })
+    expect(toggle).toHaveAttribute('aria-pressed', 'false')
     fireEvent.click(toggle)
     expect(props.onTorchToggle).toHaveBeenCalledWith(true)
   })
 
-  it('reflects the torch state', () => {
+  it('reflects the torch state on the quick toggle', () => {
     renderHeader({ hasTorch: true, torchOn: true })
+    const toggle = screen.getByRole('button', { name: 'Flashlight' })
+    expect(toggle).toHaveAttribute('aria-pressed', 'true')
+    expect(toggle).toHaveClass('bg-green-500', 'text-white')
+  })
+
+  it('hides the flashlight quick toggle while frozen even with torch support', () => {
+    renderHeader({ hasTorch: true, frozen: true })
+    expect(screen.queryByRole('button', { name: 'Flashlight' })).not.toBeInTheDocument()
+  })
+
+  it('renders quick toggles with exact names, hidden glyphs, and 48px targets', () => {
+    renderHeader({ hasTorch: true })
+    const freeze = screen.getByRole('button', { name: 'Freeze frame' })
+    expect(freeze).toHaveClass('min-h-[48px]', 'min-w-[48px]')
+    expect(freeze).toHaveAttribute('aria-pressed', 'false')
+    expect(freeze).toHaveClass('bg-white/10', 'text-white')
+    expect(freeze.querySelector('[aria-hidden="true"]')).toHaveTextContent('⏸')
+    const torch = screen.getByRole('button', { name: 'Flashlight' })
+    expect(torch).toHaveClass('min-h-[48px]', 'min-w-[48px]')
+    expect(torch.querySelector('[aria-hidden="true"]')).toHaveTextContent('🔦')
+  })
+
+  it('shows the freeze quick toggle in the top bar when live', () => {
+    renderHeader()
+    expect(screen.getByRole('button', { name: 'Freeze frame' })).toBeInTheDocument()
+  })
+
+  it('hides the freeze quick toggle when the camera is off air', () => {
+    renderHeader({ live: false })
+    expect(screen.queryByRole('button', { name: 'Freeze frame' })).not.toBeInTheDocument()
+  })
+
+  it('keeps the freeze quick toggle while frozen even when off air', () => {
+    renderHeader({ live: false, frozen: true })
+    expect(screen.getByRole('button', { name: 'Freeze frame' })).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('reports freeze toggles through the callback', () => {
+    const props = renderHeader()
+    fireEvent.click(screen.getByRole('button', { name: 'Freeze frame' }))
+    expect(props.onFreezeToggle).toHaveBeenCalledWith(true)
+  })
+
+  it('reflects the frozen state on the quick toggle', () => {
+    renderHeader({ frozen: true })
+    const toggle = screen.getByRole('button', { name: 'Freeze frame' })
+    expect(toggle).toHaveAttribute('aria-pressed', 'true')
+    expect(toggle).toHaveClass('bg-green-500', 'text-white')
+  })
+
+  it('keeps freeze and flashlight out of the overflow', () => {
+    renderHeader({ hasTorch: true })
     openOverflow()
-    expect(screen.getByRole('switch', { name: 'Flashlight' })).toBeChecked()
+    expect(screen.queryByRole('switch', { name: 'Freeze frame' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('switch', { name: 'Flashlight' })).not.toBeInTheDocument()
+    // Exactly one of each: the top-bar quick toggle, not an overflow duplicate.
+    expect(screen.getAllByRole('button', { name: 'Freeze frame' })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: 'Flashlight' })).toHaveLength(1)
   })
 
   it('wires the overflow controls to their callbacks', () => {
@@ -130,10 +197,99 @@ describe('Header', () => {
     openOverflow()
     fireEvent.click(screen.getByRole('button', { name: 'Switch camera' }))
     expect(props.onSwitchCamera).toHaveBeenCalledTimes(1)
+    // The menu closes after each press, so reopen it between controls.
+    openOverflow()
     fireEvent.click(screen.getByText('Clear AR View'))
     expect(props.onClearView).toHaveBeenCalledTimes(1)
+    openOverflow()
     fireEvent.click(screen.getByText('Export Report'))
     expect(props.onExportReport).toHaveBeenCalledTimes(1)
+  })
+
+  it('closes the menu after the voice toggle is pressed', () => {
+    const props = renderHeader()
+    openOverflow()
+    fireEvent.click(screen.getByRole('switch', { name: 'Voice mode' }))
+    expect(props.onVoiceToggle).toHaveBeenCalledWith(true)
+    expectMenuClosed()
+  })
+
+  it('closes the menu after the camera switch is pressed', () => {
+    const props = renderHeader()
+    openOverflow()
+    fireEvent.click(screen.getByRole('button', { name: 'Switch camera' }))
+    expect(props.onSwitchCamera).toHaveBeenCalledTimes(1)
+    expectMenuClosed()
+  })
+
+  it('closes the menu after Clear AR View is pressed', () => {
+    const props = renderHeader()
+    openOverflow()
+    fireEvent.click(screen.getByText('Clear AR View'))
+    expect(props.onClearView).toHaveBeenCalledTimes(1)
+    expectMenuClosed()
+  })
+
+  it('closes the menu after Export Report is pressed', () => {
+    const props = renderHeader()
+    openOverflow()
+    fireEvent.click(screen.getByText('Export Report'))
+    expect(props.onExportReport).toHaveBeenCalledTimes(1)
+    expectMenuClosed()
+  })
+
+  it('closes the menu when the QR trigger opens the dialog', () => {
+    renderHeader()
+    openOverflow()
+    fireEvent.click(screen.getByRole('button', { name: 'QR' }))
+    expect(screen.getByRole('dialog', { name: 'Share via QR code' })).toBeInTheDocument()
+    expectMenuClosed()
+    expect(screen.queryByRole('button', { name: 'QR' })).not.toBeInTheDocument()
+  })
+
+  it('keeps the dialog usable after the menu closes for QR', () => {
+    renderHeader()
+    openOverflow()
+    fireEvent.click(screen.getByRole('button', { name: 'QR' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(screen.queryByRole('dialog', { name: 'Share via QR code' })).not.toBeInTheDocument()
+    expectMenuClosed()
+    openOverflow()
+    expectMenuOpen()
+    expect(screen.getByRole('button', { name: 'QR' })).toBeInTheDocument()
+  })
+
+  it('keeps the menu open while the Logs disclosure expands and its buttons run', () => {
+    renderHeader()
+    openOverflow()
+    fireEvent.click(screen.getByRole('button', { name: 'Logs' }))
+    expectMenuOpen()
+    expect(screen.getByRole('button', { name: 'Hide Logs' })).toBeInTheDocument()
+    expect(screen.getByRole('log', { name: 'Application log' })).toBeInTheDocument()
+
+    // Download needs blob-URL and anchor-click stubs in the test environment.
+    const createObjectURL = URL.createObjectURL
+    const revokeObjectURL = URL.revokeObjectURL
+    Object.assign(URL, {
+      createObjectURL: vi.fn(() => 'blob:mock'),
+      revokeObjectURL: vi.fn(),
+    })
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    try {
+      fireEvent.click(screen.getByRole('button', { name: 'Copy' }))
+      expectMenuOpen()
+      fireEvent.click(screen.getByRole('button', { name: 'Download' }))
+      expectMenuOpen()
+      fireEvent.click(screen.getByRole('button', { name: 'Clear' }))
+      expectMenuOpen()
+    } finally {
+      Object.assign(URL, { createObjectURL, revokeObjectURL })
+      anchorClick.mockRestore()
+    }
+
+    fireEvent.click(screen.getByRole('button', { name: 'Hide Logs' }))
+    expectMenuOpen()
+    expect(screen.queryByRole('log', { name: 'Application log' })).not.toBeInTheDocument()
   })
 
   it('hides the camera switcher in the overflow with a single camera', () => {
@@ -149,38 +305,6 @@ describe('Header', () => {
     expect(screen.getByText('Logs')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'More options' }))
     expect(screen.queryByText('Logs')).not.toBeInTheDocument()
-  })
-
-  it('shows the freeze switch in the overflow camera cluster when live', () => {
-    renderHeader()
-    expect(screen.queryByRole('switch', { name: 'Freeze frame' })).not.toBeInTheDocument()
-    openOverflow()
-    expect(screen.getByRole('switch', { name: 'Freeze frame' })).toBeInTheDocument()
-  })
-
-  it('hides the freeze switch when the camera is off air', () => {
-    renderHeader({ live: false })
-    openOverflow()
-    expect(screen.queryByRole('switch', { name: 'Freeze frame' })).not.toBeInTheDocument()
-  })
-
-  it('keeps the freeze switch while frozen even when off air', () => {
-    renderHeader({ live: false, frozen: true })
-    openOverflow()
-    expect(screen.getByRole('switch', { name: 'Freeze frame' })).toBeChecked()
-  })
-
-  it('reports freeze toggles through the callback', () => {
-    const props = renderHeader()
-    openOverflow()
-    fireEvent.click(screen.getByRole('switch', { name: 'Freeze frame' }))
-    expect(props.onFreezeToggle).toHaveBeenCalledWith(true)
-  })
-
-  it('reflects the frozen state', () => {
-    renderHeader({ frozen: true })
-    openOverflow()
-    expect(screen.getByRole('switch', { name: 'Freeze frame' })).toBeChecked()
   })
 
   it('shows no FROZEN badge while live and unfrozen', () => {

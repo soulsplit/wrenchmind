@@ -133,9 +133,4 @@ export interface GuidanceResult {
    * never weakens — the verify treatment.
    */
   manualTitle: string | null
-  /**
-   * One plain-text paragraph, no markdown. Deferred voice-narration seam:
-   * later voice output reads this same field. Nothing speaks it yet.
-   */
-  speechSummary: string
 }

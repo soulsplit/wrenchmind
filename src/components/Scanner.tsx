@@ -21,6 +21,7 @@ import {
 } from '../services/metaApi'
 import type { SamPointPrompt } from '../services/metaApi'
 import {
+  clampPct,
   clampZoomPan,
   identifyWithContext,
   NO_ZOOM,
@@ -74,11 +75,8 @@ interface TorchConstraintSet extends MediaTrackConstraintSet {
 /** Re-segment cadence while an overlay tracks a moving subject. */
 const REFRESH_INTERVAL_MS = 2000
 
-const FILL: Record<OverlayKind, [number, number, number]> = {
-  component: [0, 255, 255], // cyan
-  connector: [255, 255, 0], // yellow
-  fastener: [255, 0, 0], // red
-}
+/** Spotlight dim opacity over non-target frame regions. */
+const DIM_ALPHA = 0.55
 
 const STROKE: Record<OverlayKind, string> = {
   component: '#00ffff',
@@ -95,12 +93,6 @@ function classifyTarget(label: string): OverlayKind {
     return 'fastener'
   }
   return 'component'
-}
-
-/** Clamp a 0-100 viewport percent into range; non-finite values anchor at 0. */
-function clampPct(value: number): number {
-  if (!Number.isFinite(value)) return 0
-  return Math.min(100, Math.max(0, value))
 }
 
 /**
@@ -203,6 +195,8 @@ export default function Scanner() {
   const [voiceOn, setVoiceOn] = useState(false)
   const [callout, setCallout] = useState<Callout | null>(null)
   const overlaysRef = useRef<Overlay[]>([])
+  /** Cached hole-punch staging canvas; resized per overlay in draw(). */
+  const holeRef = useRef<HTMLCanvasElement | null>(null)
   const assistantRef = useRef<VoiceAssistant | null>(null)
   const voiceOnRef = useRef(false)
   voiceOnRef.current = voiceOn
@@ -238,6 +232,13 @@ export default function Scanner() {
   const [hasTorch, setHasTorch] = useState(false)
   const [cameraLive, setCameraLive] = useState(false)
   const [frozen, setFrozen] = useState(false)
+  const frozenRef = useRef(false)
+  frozenRef.current = frozen
+  /** Pixel source of truth while frozen; the video element carries no stream. */
+  const stillRef = useRef<HTMLCanvasElement | null>(null)
+  const [stillUrl, setStillUrl] = useState<string | null>(null)
+  /** Bumped on unfreeze to re-acquire the camera via the camera effect. */
+  const [restartKey, setRestartKey] = useState(0)
   const [zoom, setZoom] = useState<ZoomState>(NO_ZOOM)
   const zoomRef = useRef(zoom)
   zoomRef.current = zoom
@@ -269,14 +270,40 @@ export default function Scanner() {
   // Keyboard lift: the bottom dock alone rides above the visual viewport.
   const keyboardShift = useKeyboardShift()
 
+  /** Stop every track on the video element and mark the feed dark. */
+  const stopTracks = useCallback(() => {
+    const video = videoRef.current
+    const stream = video?.srcObject as MediaStream | null
+    stream?.getTracks().forEach((t) => t.stop())
+    if (video) video.srcObject = null
+    setCameraLive(false)
+  }, [])
+
+  /**
+   * Current frame source: the frozen still canvas while frozen, else the
+   * live video element. Refs only — []-stable for the voice chain.
+   */
+  const frameTarget = useCallback((): {
+    el: HTMLVideoElement | HTMLCanvasElement | null
+    w: number
+    h: number
+  } => {
+    if (frozenRef.current && stillRef.current) {
+      const still = stillRef.current
+      return { el: still, w: still.width, h: still.height }
+    }
+    const video = videoRef.current
+    return { el: video, w: video?.videoWidth ?? 0, h: video?.videoHeight ?? 0 }
+  }, [])
+
   const draw = useCallback((force = false) => {
     const canvas = canvasRef.current
-    const video = videoRef.current
-    if (!canvas || !video) return
+    if (!canvas) return
     const ctx = canvas.getContext('2d')
     if (!ctx) return
-    const w = video.videoWidth || window.innerWidth
-    const h = video.videoHeight || window.innerHeight
+    const { w: fw, h: fh } = frameTarget()
+    const w = fw || window.innerWidth
+    const h = fh || window.innerHeight
     // Blank canvases stay blank: skip the resize/clear churn when idle.
     if (!force && overlaysRef.current.length === 0 && canvas.width === w && canvas.height === h) {
       return
@@ -284,22 +311,42 @@ export default function Scanner() {
     canvas.width = w
     canvas.height = h
     ctx.clearRect(0, 0, canvas.width, canvas.height)
-    for (const { rec, kind, label } of overlaysRef.current) {
-      const { box, raster } = rec
-      const [r, g, b] = FILL[kind]
-      if (raster.length > 0) {
-        const img = ctx.createImageData(box.w, box.h)
-        const pixels = Math.min(raster.length, box.w * box.h)
-        for (let i = 0; i < pixels; i++) {
-          if (raster[i]) {
-            img.data[i * 4] = r
-            img.data[i * 4 + 1] = g
-            img.data[i * 4 + 2] = b
-            img.data[i * 4 + 3] = 140
+    // Spotlight: dim the full frame, then punch each target back to clear.
+    if (overlaysRef.current.length > 0) {
+      ctx.fillStyle = `rgba(0, 0, 0, ${DIM_ALPHA})`
+      ctx.fillRect(0, 0, canvas.width, canvas.height)
+      ctx.globalCompositeOperation = 'destination-out'
+      for (const { rec } of overlaysRef.current) {
+        const { box, raster } = rec
+        if (raster.length > 0) {
+          let hole = holeRef.current
+          if (!hole) {
+            hole = document.createElement('canvas')
+            holeRef.current = hole
           }
+          hole.width = box.w
+          hole.height = box.h
+          const holeCtx = hole.getContext('2d')
+          if (holeCtx) {
+            const img = holeCtx.createImageData(box.w, box.h)
+            const pixels = Math.min(raster.length, box.w * box.h)
+            for (let i = 0; i < pixels; i++) {
+              if (raster[i]) {
+                img.data[i * 4 + 3] = 255
+              }
+            }
+            holeCtx.putImageData(img, 0, 0)
+            ctx.drawImage(hole, box.x1, box.y1)
+          }
+        } else {
+          // Box corners are inclusive pixels.
+          ctx.fillRect(box.x1, box.y1, box.x2 - box.x1 + 1, box.y2 - box.y1 + 1)
         }
-        ctx.putImageData(img, box.x1, box.y1)
       }
+      ctx.globalCompositeOperation = 'source-over'
+    }
+    for (const { rec, kind, label } of overlaysRef.current) {
+      const { box } = rec
       ctx.strokeStyle = STROKE[kind]
       ctx.lineWidth = 3
       ctx.shadowColor = STROKE[kind]
@@ -320,7 +367,7 @@ export default function Scanner() {
       }
     }
     ctx.shadowBlur = 0
-  }, [])
+  }, [frameTarget])
 
   // Surface a missing API key up front instead of failing per phrase.
   useEffect(() => {
@@ -353,6 +400,10 @@ export default function Scanner() {
         if (!cancelled) {
           logError('camera', blocker)
           setError(blocker)
+          // Failed restart (a still exists, so this is not initial load):
+          // fall back to frozen so the still stays tappable and unfreezing
+          // retries the camera.
+          if (stillRef.current) setFrozen(true)
         }
         return
       }
@@ -383,6 +434,10 @@ export default function Scanner() {
         const hint = (await permissionBlocker('camera', 'Camera access')) ?? 'Camera access denied'
         logError('camera', `all camera attempts failed (${hint})`)
         setError(hint)
+        // Failed restart (a still exists, so this is not initial load):
+        // fall back to frozen so the still stays tappable and unfreezing
+        // retries the camera.
+        if (stillRef.current) setFrozen(true)
         return
       }
       if (!cancelled) {
@@ -411,7 +466,13 @@ export default function Scanner() {
         videoRef.current.srcObject = stream
         try {
           await videoRef.current.play()
-          if (!cancelled) setCameraLive(true)
+          if (!cancelled) {
+            setCameraLive(true)
+            // Re-acquire succeeded: drop the still only now so the frame
+            // never flashes black during restart.
+            stillRef.current = null
+            setStillUrl(null)
+          }
         } catch {
           logWarn('camera', 'video autoplay was blocked')
         }
@@ -419,18 +480,31 @@ export default function Scanner() {
     })()
     return () => {
       cancelled = true
-      setCameraLive(false)
+      stopTracks()
       setFrozen(false)
       setActualFacing('unknown')
       setTorchOn(false)
       setHasTorch(false)
       stream?.getTracks().forEach((t) => t.stop())
     }
-  }, [facing])
+  }, [facing, restartKey, stopTracks])
 
+  // Reconcile the canvas backing store when the stream's dimensions
+  // arrive or change: draw() sizes from videoWidth/Height, and every
+  // overlay mutation already calls draw() directly, so no polling loop is
+  // needed to track the stream or repaint idle frames.
   useEffect(() => {
-    const id = window.setInterval(draw, 200)
-    return () => window.clearInterval(id)
+    const video = videoRef.current
+    if (!video) return
+    const sync = () => draw()
+    // Size now in case metadata already loaded before this effect ran.
+    sync()
+    video.addEventListener('loadedmetadata', sync)
+    video.addEventListener('resize', sync)
+    return () => {
+      video.removeEventListener('loadedmetadata', sync)
+      video.removeEventListener('resize', sync)
+    }
   }, [draw])
 
   const clearRefresh = useCallback(() => {
@@ -441,8 +515,10 @@ export default function Scanner() {
     targetRef.current = null
   }, [])
 
+  // clearRefresh returned as the cleanup: disarms the refresh loop on unmount.
   useEffect(() => clearRefresh, [clearRefresh])
 
+  // Silence any in-flight speech on unmount so audio never outlives the view.
   useEffect(() => () => cancelSpeech(), [])
 
   const tickRefresh = useCallback(async () => {
@@ -512,38 +588,53 @@ export default function Scanner() {
   }, [])
 
   /**
-   * Freeze-frame workbench switch. Freezing pauses only the refresh
-   * timeout (masks stay painted) and stills the video; resuming replays
-   * the video and re-arms ticks when a target is tracked.
+   * Freeze-frame workbench switch. Freezing snapshots the current frame to
+   * a still canvas, pauses the refresh timeout (masks stay painted), and
+   * stops the camera tracks; resuming clears the trace and AR annotations,
+   * drops the tracked target, and bumps restartKey to re-acquire the
+   * camera via the effect. The still stays rendered until re-acquire
+   * succeeds.
    */
   const setFrozenMode = useCallback(
     (next: boolean) => {
-      const video = videoRef.current
       if (next) {
+        const video = videoRef.current
+        const vw = video?.videoWidth ?? 0
+        const vh = video?.videoHeight ?? 0
+        if (video && vw > 0 && vh > 0) {
+          const still = document.createElement('canvas')
+          still.width = vw
+          still.height = vh
+          still.getContext('2d')?.drawImage(video, 0, 0, vw, vh)
+          stillRef.current = still
+          setStillUrl(still.toDataURL('image/jpeg', 0.92))
+        }
         pauseRefresh()
-        video?.pause()
+        stopTracks()
+        if (torchOn) {
+          setTorchOn(false)
+          logInfo('camera', 'flashlight off (freeze stopped the camera)')
+        }
         setFrozen(true)
-        logInfo('camera', 'frame frozen — circle or tap a part')
+        logInfo('camera', 'frame frozen — camera stopped, circle or tap a part')
         return
       }
       traceRef.current = null
       setTrace(null)
+      // Frozen-scene paint is stale once live; job data — findings,
+      // guidance, photos, memory — intentionally preserved.
+      overlaysRef.current = []
+      setCallout(null)
+      setEmptyTarget(false)
+      clearRefresh()
+      trackingRef.current = false
+      setTracking(false)
+      draw(true)
       setFrozen(false)
-      if (video) {
-        void (async () => {
-          try {
-            await video.play()
-          } catch {
-            logWarn('camera', 'video autoplay was blocked')
-          }
-        })()
-      }
-      if (targetRef.current && refreshRef.current === null) {
-        refreshRef.current = window.setTimeout(() => void tickRefresh(), REFRESH_INTERVAL_MS)
-      }
-      logInfo('camera', 'frame live')
+      setRestartKey((k) => k + 1)
+      logInfo('camera', 'frame live — AR annotations cleared')
     },
-    [pauseRefresh, tickRefresh],
+    [pauseRefresh, stopTracks, clearRefresh, draw, torchOn],
   )
 
   /**
@@ -606,6 +697,8 @@ export default function Scanner() {
     )
   }, [])
 
+  // Identity must stay stable (all deps []-stable): the voice effect
+  // resubscribes on change, which would recreate the recognizer mid-listen.
   const handlePhrase = useCallback(async (phrase: string) => {
     // Serialize analyses; the latest phrase spoken mid-flight runs next.
     if (busyRef.current) {
@@ -614,9 +707,9 @@ export default function Scanner() {
     }
     busyRef.current = true
     try {
-      const video = videoRef.current
+      const { el, w: vw, h: vh } = frameTarget()
       const assistant = assistantRef.current
-      if (!video) return
+      if (!el) return
       if (!hasApiKey()) {
         setError('API key missing: set VITE_META_MODEL_API_KEY in .env')
         setStatus(voiceOnRef.current ? 'listening' : 'off')
@@ -639,7 +732,7 @@ export default function Scanner() {
         // Proof-of-work: pin a thumbnail to the step just finished. Back and
         // repeat re-read without producing evidence.
         if (command === 'next') {
-          const shot = captureThumbnail(video)
+          const shot = captureThumbnail(el)
           if (shot) {
             setStepPhotos((prev) => ({ ...prev, [current]: shot }))
             logInfo('photo', `checkpoint pinned to step ${current + 1}`)
@@ -662,7 +755,7 @@ export default function Scanner() {
         setEmptyTarget(false)
         logInfo('phrase', `"${phrase}"`)
         try {
-          const frame = captureVideoFrame(video)
+          const frame = captureVideoFrame(el)
           if (!frame) throw new Error('No video frame')
           const found = await extractLabelText(frame)
           if (found.length === 0) {
@@ -685,7 +778,7 @@ export default function Scanner() {
       setEmptyTarget(false)
       logInfo('phrase', `"${phrase}"`)
       try {
-        const frames = await captureFrameBurst(video)
+        const frames = await captureFrameBurst(el)
         if (frames.length === 0) throw new Error('No video frame')
         logDebug('camera', `burst: ${frames.length} frames`)
         const img = frames[frames.length - 1]
@@ -711,16 +804,16 @@ export default function Scanner() {
             result.points && result.points.length > 1
               ? result.points
               : [{ x: result.approx_x, y: result.approx_y }]
-          const cap = captureDims(video.videoWidth, video.videoHeight)
+          const cap = captureDims(vw, vh)
           const pixelPts = targetPts
-            .map((p) => toPixelPoint(p.x, p.y, video.videoWidth, video.videoHeight))
+            .map((p) => toPixelPoint(p.x, p.y, vw, vh))
             .filter((p): p is SamPointPrompt => p !== undefined)
             .map((p) => toCapturePoint(p, cap))
           const prompt = pixelPts.length > 1 ? pixelPts : pixelPts[0]
           const recs = (
             await parseSamStream(segmentImage(img, result.target_label, prompt))
           ).map((rec) =>
-            scaleRecordToVideo(rec, cap.width, cap.height, video.videoWidth, video.videoHeight),
+            scaleRecordToVideo(rec, cap.width, cap.height, vw, vh),
           )
           const spans = recs
             .slice(0, 3)
@@ -728,7 +821,7 @@ export default function Scanner() {
             .join(',')
           logDebug(
             'segment',
-            `${recs.length} masks [${spans}] in ${video.videoWidth}x${video.videoHeight}`,
+            `${recs.length} masks [${spans}] in ${vw}x${vh}`,
           )
           const plural = targetPts.length > 1 && recs.length > 1
           if (plural) logInfo('segment', `isolated ${recs.length} × "${result.target_label}"`)
@@ -775,7 +868,7 @@ export default function Scanner() {
       pendingRef.current = null
       if (next) void handlePhrase(next)
     }
-  }, [draw, armRefresh, requestGuidance, requestGuides, speakReply])
+  }, [draw, armRefresh, frameTarget, requestGuidance, requestGuides, speakReply])
 
   /**
    * Shared tap/circle outline tail: numbered badge, overlay, memory,
@@ -817,14 +910,15 @@ export default function Scanner() {
    * Frozen-frame tap-to-outline: segment at the tap point, crop the largest
    * mask (tap-centered fallback when SAM returns none), identify the part,
    * then outline it with a numbered badge, callout, speech, and memory.
-   * Ignored while live, busy, or keyless; holds busyRef for the whole flow.
+   * Ignored while busy or keyless, or with no frame (neither frozen nor
+   * live); holds busyRef for the whole flow.
    */
   const handleTap = useCallback(
     async (clientX: number, clientY: number) => {
-      if (!frozen || busyRef.current) return
-      const video = videoRef.current
+      if ((!frozen && !cameraLive) || busyRef.current) return
+      const { el, w: vw, h: vh } = frameTarget()
       const layer = tapRef.current
-      if (!video || !layer) return
+      if (!el || !layer) return
       if (!hasApiKey()) {
         setError('API key missing: set VITE_META_MODEL_API_KEY in .env')
         return
@@ -837,25 +931,25 @@ export default function Scanner() {
           clientX,
           clientY,
           layer.getBoundingClientRect(),
-          video.videoWidth,
-          video.videoHeight,
+          vw,
+          vh,
           zoomRef.current.scale,
         )
         if (!tap) throw new Error('No video frame')
-        const img = captureVideoFrame(video)
+        const img = captureVideoFrame(el)
         if (!img) throw new Error('No video frame')
         logInfo('tap', `tap @ (${tap.x.toFixed(1)},${tap.y.toFixed(1)})`)
-        const cap = captureDims(video.videoWidth, video.videoHeight)
+        const cap = captureDims(vw, vh)
         const recs = (
           await parseSamStream(
             segmentImage(img, 'tapped part', toCapturePoint(tap.point, cap)),
           )
-        ).map((rec) => scaleRecordToVideo(rec, cap.width, cap.height, video.videoWidth, video.videoHeight))
+        ).map((rec) => scaleRecordToVideo(rec, cap.width, cap.height, vw, vh))
         const largest = largestMask(recs)
         const targetBox = largest
           ? largest.box
-          : fallbackBox(tap.point, video.videoWidth, video.videoHeight)
-        const name = await identifyWithContext(video, targetBox)
+          : fallbackBox(tap.point, vw, vh)
+        const name = await identifyWithContext(el, targetBox)
         if (!name) logWarn('tap', 'identify inconclusive after tight + wide crops')
         const kind = name ? classifyTarget(name) : 'component'
         const display = name || 'Unknown part'
@@ -885,21 +979,22 @@ export default function Scanner() {
         busyRef.current = false
       }
     },
-    [frozen, speakReply, presentOutline],
+    [frozen, cameraLive, frameTarget, speakReply, presentOutline],
   )
 
   /**
    * Circle-to-identify: segment inside the traced region (box prompt plus
    * its center point), identify with the context ladder, then outline.
    * Falls back to the user's own box when SAM returns no masks — the user
-   * already framed the part. Ignored while live, busy, or keyless.
+   * already framed the part. Ignored while busy or keyless, or with no
+   * frame (neither frozen nor live).
    */
   const handleCircle = useCallback(
     async (ax: number, ay: number, bx: number, by: number) => {
-      if (!frozen || busyRef.current) return
-      const video = videoRef.current
+      if ((!frozen && !cameraLive) || busyRef.current) return
+      const { el, w: vw, h: vh } = frameTarget()
       const stage = stageRef.current
-      if (!video || !stage) return
+      if (!el || !stage) return
       if (!hasApiKey()) {
         setError('API key missing: set VITE_META_MODEL_API_KEY in .env')
         return
@@ -915,14 +1010,14 @@ export default function Scanner() {
           by,
           stage.clientWidth,
           stage.clientHeight,
-          video.videoWidth,
-          video.videoHeight,
+          vw,
+          vh,
         )
         if (!region) throw new Error('No video frame')
-        const img = captureVideoFrame(video)
+        const img = captureVideoFrame(el)
         if (!img) throw new Error('No video frame')
         logInfo('circle', `region @ (${region.x.toFixed(1)},${region.y.toFixed(1)})`)
-        const cap = captureDims(video.videoWidth, video.videoHeight)
+        const cap = captureDims(vw, vh)
         const recs = (
           await parseSamStream(
             segmentImage(
@@ -932,17 +1027,17 @@ export default function Scanner() {
               toCaptureBox(
                 {
                   ...region.box,
-                  width: video.videoWidth,
-                  height: video.videoHeight,
+                  width: vw,
+                  height: vh,
                 },
                 cap,
               ),
             ),
           )
-        ).map((rec) => scaleRecordToVideo(rec, cap.width, cap.height, video.videoWidth, video.videoHeight))
+        ).map((rec) => scaleRecordToVideo(rec, cap.width, cap.height, vw, vh))
         const largest = largestMask(recs)
         const targetBox = largest ? largest.box : region.box
-        const name = await identifyWithContext(video, targetBox)
+        const name = await identifyWithContext(el, targetBox)
         if (!name) logWarn('circle', 'identify inconclusive after tight + wide crops')
         const kind = name ? classifyTarget(name) : 'component'
         const display = name || 'Unknown part'
@@ -976,21 +1071,21 @@ export default function Scanner() {
         busyRef.current = false
       }
     },
-    [frozen, speakReply, presentOutline],
+    [frozen, cameraLive, frameTarget, speakReply, presentOutline],
   )
 
   /** Long-press removal: drop the topmost outline containing the tap point. */
   const removeOutlineAt = useCallback(
     (clientX: number, clientY: number) => {
-      const video = videoRef.current
       const layer = tapRef.current
-      if (!video || !layer) return
+      if (!layer) return
+      const { w: vw, h: vh } = frameTarget()
       const tap = tapToMedia(
         clientX,
         clientY,
         layer.getBoundingClientRect(),
-        video.videoWidth,
-        video.videoHeight,
+        vw,
+        vh,
         zoomRef.current.scale,
       )
       if (!tap) return
@@ -1009,7 +1104,7 @@ export default function Scanner() {
       draw()
       logInfo('tap', 'outline removed (long-press)')
     },
-    [draw],
+    [draw, frameTarget],
   )
 
   const cancelPress = useCallback(() => {
@@ -1019,7 +1114,9 @@ export default function Scanner() {
     }
   }, [])
 
-  // Voice assistant lifecycle.
+  // Voice assistant lifecycle. Resubscribes whenever handlePhrase identity
+  // changes (recreating the recognizer mid-listen), so handlePhrase and its
+  // callees must keep []-stable identities — never add state to that chain.
   useEffect(() => {
     const assistant = new VoiceAssistant({
       onPhrase: (phrase) => void handlePhrase(phrase),
@@ -1054,6 +1151,9 @@ export default function Scanner() {
     }
   }
 
+  // Full scene reset. Zoom intentionally persists (view preference, not
+  // scene data); a queued pendingRef phrase and an in-flight trace also
+  // survive — both resolve against the cleared state harmlessly.
   const resetOverlays = () => {
     overlaysRef.current = []
     setFindings([])
@@ -1133,8 +1233,13 @@ export default function Scanner() {
   }
 
   const flipCamera = () => {
-    // Resume the feed before switching; the effect cleanup drops frozen too.
-    if (frozen) setFrozenMode(false)
+    // Drop the still and unfreeze before switching; the facing change
+    // re-runs the camera effect exactly once (no restartKey bump needed).
+    if (frozen) {
+      stillRef.current = null
+      setStillUrl(null)
+      setFrozen(false)
+    }
     // The overlay belongs to the old scene: clear it before switching.
     resetOverlays()
     logInfo('camera', 'switching camera')
@@ -1194,7 +1299,10 @@ export default function Scanner() {
             cancelPress()
             return
           }
-          if (frozen && pointersRef.current.size === 1) {
+          if (
+            (frozen || (cameraLive && zoomRef.current.scale <= ZOOM_MIN)) &&
+            pointersRef.current.size === 1
+          ) {
             const pt = toStagePoint(e.clientX, e.clientY)
             storeTrace(pt ? [pt] : null)
           }
@@ -1228,8 +1336,9 @@ export default function Scanner() {
             pinchRef.current = { dist, midX, midY }
             return
           }
-          // Frozen single-finger drags trace a circle; live drags pan.
-          if (frozen) {
+          // Frozen (and unzoomed live) single-finger drags trace a circle;
+          // zoomed live drags pan.
+          if (frozen || (cameraLive && zoomRef.current.scale <= ZOOM_MIN)) {
             const pt = toStagePoint(e.clientX, e.clientY)
             if (pt) {
               const base = traceRef.current ?? []
@@ -1259,7 +1368,11 @@ export default function Scanner() {
           }
           const done = traceRef.current
           storeTrace(null)
-          if (frozen && done && done.length > 0) {
+          if (
+            (frozen || (cameraLive && zoomRef.current.scale <= ZOOM_MIN)) &&
+            done &&
+            done.length > 0
+          ) {
             const xs = done.map((pt) => pt.x)
             const ys = done.map((pt) => pt.y)
             const ax = Math.min(...xs)
@@ -1310,6 +1423,14 @@ export default function Scanner() {
         aria-label="Live camera feed"
         className="absolute inset-0 w-full h-full object-cover"
       />
+      {stillUrl && !cameraLive && (
+        <img
+          src={stillUrl}
+          alt="Frozen frame"
+          draggable={false}
+          className="absolute inset-0 w-full h-full object-cover"
+        />
+      )}
       {/*
         Same cover geometry as the video: the backing store matches the frame
         aspect, so object-cover aligns frame-pixel masks with the feed.
@@ -1320,15 +1441,15 @@ export default function Scanner() {
         className="absolute inset-0 w-full h-full object-cover pointer-events-none"
       />
       {/*
-        Frozen-frame tap layer: above the canvas, below the header (z-20)
-        and bottom dock (z-10). Short taps outline a part; drags trace a
-        circle to identify the enclosed region; a 500ms hold with minimal
-        drift removes the outline under the finger.
+        Tap layer (frozen or live camera): above the canvas, below the
+        header (z-20) and bottom dock (z-10). Short taps outline a part;
+        drags trace a circle to identify the enclosed region; a 500ms hold
+        with minimal drift removes the outline under the finger.
       */}
-      {frozen && (
+      {(frozen || cameraLive) && (
         <div
           ref={tapRef}
-          aria-label="Frozen frame: circle or tap to identify a part"
+          aria-label="Circle or tap to identify a part"
           onClick={(e) => {
             if (suppressTapRef.current) {
               suppressTapRef.current = false
@@ -1408,7 +1529,7 @@ export default function Scanner() {
         onTorchToggle={(next) => void toggleTorch(next)}
         frozen={frozen}
         onFreezeToggle={(next) => setFrozenMode(next)}
-        hint={frozen ? 'Drag to circle a part · tap to identify' : null}
+        hint={(frozen || cameraLive) ? 'Drag to circle a part · tap to identify' : null}
       />
       {/*
         Bottom dock: error toast, HUD card, and thumb-reachable query input

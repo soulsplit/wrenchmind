@@ -65,6 +65,7 @@ export function buildReport({ guidance, stepIndex, workingOn, findings, photos }
         : '<p>Manual: not found — verify against your manual.</p>',
     )
     out.push('<h3>Steps</h3>')
+    // First-10-wins by step order: earliest checkpoints survive the cap.
     const photoByStep = new Map(
       [...(photos ?? [])].sort((a, b) => a.step - b.step).slice(0, MAX_REPORT_PHOTOS).map((p) => [p.step, p.dataUrl] as const),
     )

@@ -1,4 +1,4 @@
-import { cropRegion, identifyComponent, type SamPointPrompt } from './metaApi'
+import { cropRegion, extractLabelText, identifyComponent, sourceDims, type SamPointPrompt } from './metaApi'
 import type { MaskBox } from '../types'
 
 /**
@@ -8,7 +8,7 @@ import type { MaskBox } from '../types'
  */
 
 /** Clamp a 0-100 viewport percent into range; non-finite values anchor at 0. */
-function clampPct(value: number): number {
+export function clampPct(value: number): number {
   if (!Number.isFinite(value)) return 0
   return Math.min(100, Math.max(0, value))
 }
@@ -95,24 +95,62 @@ export function pinchZoom(
 
 /**
  * Identify a region with a two-attempt ladder: a tight crop first, then a
- * wide-context crop when the tight one comes back unnamed. Returns '' only
- * when both attempts fail, so transient misses rarely surface as unknown.
+ * wide-context crop when the tight one comes back unnamed. An empty crop
+ * skips to the next pad rather than aborting. After the ladder, OCR on the
+ * tight crop fuses in legible markings: it names an otherwise-unnamed part
+ * ("part labeled ...") or annotates a small-region label. Returns '' only
+ * when every attempt fails, so transient misses rarely surface as unknown.
+ * OCR failures never throw: they fall back to the ladder result.
  */
 export async function identifyWithContext(
-  video: HTMLVideoElement,
+  source: HTMLVideoElement | HTMLCanvasElement,
   box: Pick<MaskBox, 'x1' | 'y1' | 'x2' | 'y2'>,
 ): Promise<string> {
+  let tightCrop = ''
+  let result = ''
+  let first = true
   for (const pad of [0.2, 1.0]) {
-    const crop = cropRegion(video, box, pad)
-    if (!crop) return ''
+    const crop = cropRegion(source, box, pad)
+    if (first) {
+      tightCrop = crop
+      first = false
+    }
+    if (!crop) continue
     try {
       const name = await identifyComponent(crop)
-      if (name) return name
+      if (name) {
+        result = name
+        break
+      }
     } catch {
       // Fall through to the wider-context attempt.
     }
   }
-  return ''
+  if (!result) {
+    if (!tightCrop) return ''
+    try {
+      const findings = await extractLabelText(tightCrop)
+      if (findings[0]) return `part labeled "${findings[0]}"`.slice(0, 80)
+    } catch {
+      // Fall through to ''.
+    }
+    return ''
+  }
+  if (tightCrop) {
+    const { w, h } = sourceDims(source)
+    const frameArea = w * h
+    const boxArea =
+      Math.max(1, box.x2 - box.x1 + 1) * Math.max(1, box.y2 - box.y1 + 1)
+    if (frameArea > 0 && boxArea / frameArea < 0.04) {
+      try {
+        const findings = await extractLabelText(tightCrop)
+        if (findings[0]) return `${result} — "${findings[0]}"`.slice(0, 80)
+      } catch {
+        // Fall through to the plain ladder result.
+      }
+    }
+  }
+  return result
 }
 
 /** A frozen-frame tap resolved to a SAM point prompt plus 0-100 viewport pct. */

@@ -381,3 +381,104 @@ describe('HudCard iFixit guides', () => {
     expect(screen.getByRole('button', { name: 'Minimize steps' })).toBeInTheDocument()
   })
 })
+
+describe('HudCard sizing', () => {
+  function cardSection(): HTMLElement {
+    const section = screen
+      .getByRole('button', { name: 'Minimize steps' })
+      .closest('section')
+    if (!section) throw new Error('guidance section missing')
+    return section
+  }
+
+  it('maximizes next to minimize and restores back to normal', () => {
+    renderCard(validGuidanceFixture)
+    expect(cardSection()).toHaveClass('max-h-[44dvh]')
+    const minimize = screen.getByRole('button', { name: 'Minimize steps' })
+    const maximize = screen.getByRole('button', { name: 'Maximize steps' })
+    expect(
+      minimize.compareDocumentPosition(maximize) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+    fireEvent.click(maximize)
+    expect(cardSection()).toHaveClass('max-h-[80dvh]')
+    expect(screen.getByText('Remove the belt cover')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Maximize steps' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Restore steps' }))
+    expect(cardSection()).toHaveClass('max-h-[44dvh]')
+    expect(screen.getByRole('button', { name: 'Maximize steps' })).toBeInTheDocument()
+  })
+
+  it('minimizes from maximized and expands back to normal size', () => {
+    renderCard(validGuidanceFixture)
+    fireEvent.click(screen.getByRole('button', { name: 'Maximize steps' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Minimize steps' }))
+    expect(screen.getByRole('button', { name: 'Expand steps' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand steps' }))
+    expect(cardSection()).toHaveClass('max-h-[44dvh]')
+  })
+
+  it('keeps maximized state across step changes', () => {
+    const { rerender } = render(
+      <HudCard
+        guidance={validGuidanceFixture}
+        pending={false}
+        stepIndex={0}
+        onStepChange={() => undefined}
+        onScanAnother={() => undefined}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Maximize steps' }))
+    rerender(
+      <HudCard
+        guidance={validGuidanceFixture}
+        pending={false}
+        stepIndex={1}
+        onStepChange={() => undefined}
+        onScanAnother={() => undefined}
+      />,
+    )
+    expect(cardSection()).toHaveClass('max-h-[80dvh]')
+    expect(screen.getByText('Step 2 of 3')).toBeInTheDocument()
+  })
+
+  it('resets maximized to normal when a fresh scan replaces the guidance', () => {
+    const fresh: GuidanceResult = { ...validGuidanceFixture, title: 'ALTERNATOR BELT' }
+    const { rerender } = render(
+      <HudCard
+        guidance={validGuidanceFixture}
+        pending={false}
+        stepIndex={0}
+        onStepChange={() => undefined}
+        onScanAnother={() => undefined}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Maximize steps' }))
+    rerender(
+      <HudCard
+        guidance={fresh}
+        pending={false}
+        stepIndex={0}
+        onStepChange={() => undefined}
+        onScanAnother={() => undefined}
+      />,
+    )
+    expect(cardSection()).toHaveClass('max-h-[44dvh]')
+    expect(screen.getByRole('button', { name: 'Maximize steps' })).toBeInTheDocument()
+  })
+
+  it('renders sizing controls as icons without text labels', () => {
+    renderCard(validGuidanceFixture)
+    for (const label of ['Minimize', 'Maximize']) {
+      const button = screen.getByRole('button', { name: `${label} steps` })
+      expect(button.textContent).toBe('')
+      expect(button.querySelector('svg')).toHaveAttribute('aria-hidden', 'true')
+    }
+    expect(screen.queryByText('Minimize')).not.toBeInTheDocument()
+    expect(screen.queryByText('Maximize')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Minimize steps' }))
+    const expand = screen.getByRole('button', { name: 'Expand steps' })
+    expect(expand.textContent).toBe('')
+    expect(expand.querySelector('svg')).toHaveAttribute('aria-hidden', 'true')
+    expect(screen.queryByText('Expand')).not.toBeInTheDocument()
+  })
+})

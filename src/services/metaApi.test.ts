@@ -13,6 +13,7 @@ import {
   identifyComponent,
   reasonSpatial,
   segmentImage,
+  sourceDims,
   toCaptureBox,
   toCapturePoint,
 } from './metaApi'
@@ -578,6 +579,29 @@ describe('captureVideoFrame', () => {
       ctxSpy.mockRestore()
     }
   })
+
+  it('captures from a frozen-frame canvas with the same downscale cap', () => {
+    const drawImage = vi.fn()
+    const ctxSpy = vi
+      .spyOn(window.HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue({ drawImage } as unknown as CanvasRenderingContext2D)
+    try {
+      const still = document.createElement('canvas')
+      still.width = 3840
+      still.height = 2160
+      expect(captureVideoFrame(still)).toBe('data:image/jpeg;base64,')
+      expect(drawImage).toHaveBeenCalledWith(still, 0, 0, 1920, 1080)
+    } finally {
+      ctxSpy.mockRestore()
+    }
+  })
+
+  it('returns empty string when the canvas has no size', () => {
+    const still = document.createElement('canvas')
+    still.width = 0
+    still.height = 0
+    expect(captureVideoFrame(still)).toBe('')
+  })
 })
 
 describe('captureDims', () => {
@@ -680,6 +704,22 @@ describe('captureThumbnail', () => {
       ctxSpy.mockRestore()
     }
   })
+
+  it('captures a thumbnail from a frozen-frame canvas', () => {
+    const drawImage = vi.fn()
+    const ctxSpy = vi
+      .spyOn(window.HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue({ drawImage } as unknown as CanvasRenderingContext2D)
+    try {
+      const still = document.createElement('canvas')
+      still.width = 640
+      still.height = 480
+      expect(captureThumbnail(still)).toBe('data:image/jpeg;base64,')
+      expect(drawImage).toHaveBeenCalledWith(still, 0, 0, 320, 240)
+    } finally {
+      ctxSpy.mockRestore()
+    }
+  })
 })
 
 describe('cropRegion', () => {
@@ -709,8 +749,9 @@ describe('cropRegion', () => {
       expect(cropRegion(video, { x1: 100, y1: 100, x2: 199, y2: 199 })).toBe(
         'data:image/jpeg;base64,',
       )
-      // 100x100 box with 20% padding grows 20px on every side.
-      expect(drawImage).toHaveBeenCalledWith(video, 80, 80, 140, 140, 0, 0, 140, 140)
+      // 100x100 box with 20% padding grows 20px on every side, then
+      // upscales the 140px region to the 512px legibility minimum.
+      expect(drawImage).toHaveBeenCalledWith(video, 80, 80, 140, 140, 0, 0, 512, 512)
     } finally {
       ctxSpy.mockRestore()
     }
@@ -724,12 +765,14 @@ describe('cropRegion', () => {
     try {
       const video = sizedVideo(640, 480)
       cropRegion(video, { x1: 0, y1: 0, x2: 49, y2: 49 })
-      // 50x50 box pads 10px; the left/top clamp to the frame edge.
-      expect(drawImage).toHaveBeenCalledWith(video, 0, 0, 60, 60, 0, 0, 60, 60)
+      // 50x50 box pads 10px; the left/top clamp to the frame edge,
+      // then upscale to the 512px minimum.
+      expect(drawImage).toHaveBeenCalledWith(video, 0, 0, 60, 60, 0, 0, 512, 512)
       drawImage.mockClear()
       cropRegion(video, { x1: 600, y1: 440, x2: 639, y2: 479 })
-      // 40x40 box pads 8px; the right/bottom clamp to the frame edge.
-      expect(drawImage).toHaveBeenCalledWith(video, 592, 432, 48, 48, 0, 0, 48, 48)
+      // 40x40 box pads 8px; the right/bottom clamp to the frame edge,
+      // then upscale to the 512px minimum.
+      expect(drawImage).toHaveBeenCalledWith(video, 592, 432, 48, 48, 0, 0, 512, 512)
     } finally {
       ctxSpy.mockRestore()
     }
@@ -743,7 +786,8 @@ describe('cropRegion', () => {
     try {
       const video = sizedVideo(640, 480)
       cropRegion(video, { x1: 100, y1: 100, x2: 199, y2: 199 }, 0)
-      expect(drawImage).toHaveBeenCalledWith(video, 100, 100, 100, 100, 0, 0, 100, 100)
+      // Unpadded, but the 100px region still upscales to the 512px minimum.
+      expect(drawImage).toHaveBeenCalledWith(video, 100, 100, 100, 100, 0, 0, 512, 512)
     } finally {
       ctxSpy.mockRestore()
     }
@@ -760,6 +804,52 @@ describe('cropRegion', () => {
     } finally {
       ctxSpy.mockRestore()
     }
+  })
+
+  it('crops a padded box from a frozen-frame canvas', () => {
+    const drawImage = vi.fn()
+    const ctxSpy = vi
+      .spyOn(window.HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue({ drawImage } as unknown as CanvasRenderingContext2D)
+    try {
+      const still = document.createElement('canvas')
+      still.width = 640
+      still.height = 480
+      expect(cropRegion(still, { x1: 100, y1: 100, x2: 199, y2: 199 })).toBe(
+        'data:image/jpeg;base64,',
+      )
+      expect(drawImage).toHaveBeenCalledWith(still, 80, 80, 140, 140, 0, 0, 512, 512)
+    } finally {
+      ctxSpy.mockRestore()
+    }
+  })
+
+  it('never downscales large crops', () => {
+    const drawImage = vi.fn()
+    const ctxSpy = vi
+      .spyOn(window.HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue({ drawImage } as unknown as CanvasRenderingContext2D)
+    try {
+      const video = sizedVideo(1920, 1080)
+      cropRegion(video, { x1: 100, y1: 100, x2: 899, y2: 899 }, 0)
+      // An 800x800 region is already above the minimum: native size kept.
+      expect(drawImage).toHaveBeenCalledWith(video, 100, 100, 800, 800, 0, 0, 800, 800)
+    } finally {
+      ctxSpy.mockRestore()
+    }
+  })
+})
+
+describe('sourceDims', () => {
+  it('reads video dims from videoWidth/Height and canvas dims from width/height', () => {
+    const video = document.createElement('video')
+    Object.defineProperty(video, 'videoWidth', { value: 640, configurable: true })
+    Object.defineProperty(video, 'videoHeight', { value: 480, configurable: true })
+    expect(sourceDims(video)).toEqual({ w: 640, h: 480 })
+    const still = document.createElement('canvas')
+    still.width = 320
+    still.height = 240
+    expect(sourceDims(still)).toEqual({ w: 320, h: 240 })
   })
 })
 
@@ -819,5 +909,22 @@ describe('identifyComponent', () => {
     vi.stubGlobal('fetch', fetchMock)
     fetchMock.mockResolvedValueOnce(errorResponse(500, 'boom'))
     await expect(identifyComponent('img')).rejects.toThrow('Muse Spark 500')
+  })
+
+  it('scopes the prompt to parts, keys, and everyday objects', async () => {
+    vi.stubEnv('VITE_META_MODEL_API_KEY', 'k')
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue(
+      jsonResponse(sparkEnvelope(JSON.stringify({ label: 'Enter key' }))),
+    )
+
+    await expect(identifyComponent('img')).resolves.toBe('Enter key')
+    const [, init] = fetchMock.mock.calls[0] as [string, { body: string }]
+    const body = JSON.parse(init.body) as { messages: [{ content: string }] }
+    const system: string = body.messages[0].content
+    expect(system).toContain('mechanical part')
+    expect(system).toContain('electronic part')
+    expect(system).toContain('keyboard key')
+    expect(system).toContain('everyday object')
   })
 })

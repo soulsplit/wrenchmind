@@ -11,6 +11,7 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "test": "vitest run",
+    "coverage": "vitest run --coverage",
     "preview": "vite preview --host",
     "open": "npm run build && vite preview --host --open"
   },

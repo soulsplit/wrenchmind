@@ -33,14 +33,12 @@ export const validGuidanceFixture: GuidanceResult = {
     { title: 'Example Service Manual, Belt Drive chapter', url: 'https://example.com/manuals/belt-drive' },
   ],
   manualTitle: 'Example Service Manual',
-  speechSummary:
-    'Replace the mid-drive belt by removing the belt cover, releasing the tensioner, and fitting the new belt front pulley first. Disconnect the battery before starting, and verify the belt tension and screw torque against the manual.',
 }
 
 /**
- * Deliberately schema-invalid payload: wrong types, missing mandatory
- * slots, and markdown in speechSummary. Typed as `unknown` so validators
- * under test must narrow it themselves.
+ * Deliberately schema-invalid payload: wrong types and missing mandatory
+ * slots. Typed as `unknown` so validators under test must narrow it
+ * themselves.
  */
 export const invalidGuidanceFixture: unknown = {
   title: 42,
@@ -50,5 +48,4 @@ export const invalidGuidanceFixture: unknown = {
   // warnings slot missing entirely (mandatory per D2)
   sources: [{ title: 'Missing url' }],
   manualTitle: 7,
-  speechSummary: '**Markdown** is *not* allowed here.',
 }

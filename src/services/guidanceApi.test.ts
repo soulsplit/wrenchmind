@@ -238,24 +238,6 @@ describe('fetchGuidance validator edges', () => {
     await expect(fetchGuidance('BELT', 'x', '')).rejects.toThrow('no valid steps')
   })
 
-  it('rejects markdown in speechSummary', async () => {
-    stubValidWith({ speechSummary: (invalidGuidanceFixture as Record<string, unknown>)['speechSummary'] })
-    await expect(fetchGuidance('BELT', 'x', '')).rejects.toThrow('markdown')
-  })
-
-  it.each(['**bold** summary', '# Heading summary', 'See [docs](https://example.com/x)', 'Use `tool` now'])(
-    'rejects markdown variant %s',
-    async (speechSummary) => {
-      stubValidWith({ speechSummary })
-      await expect(fetchGuidance('BELT', 'x', '')).rejects.toThrow('markdown')
-    },
-  )
-
-  it('throws when speechSummary is missing', async () => {
-    stubValidWith({ speechSummary: '   ' })
-    await expect(fetchGuidance('BELT', 'x', '')).rejects.toThrow('speech summary')
-  })
-
   it('emits specs:[] plus a warnings entry when specs are unknown', async () => {
     stubValidWith({ specs: 'not-an-array', warnings: ['Wear gloves.'] })
     const result = await fetchGuidance('BELT', 'x', '')

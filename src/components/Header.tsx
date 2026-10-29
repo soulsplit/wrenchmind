@@ -31,9 +31,13 @@ interface HeaderProps {
 }
 
 /**
- * Pin-top mobile header zone: an h-14 bar (brand + overflow toggle) with the
- * LIVE/facing/status badge row docked over the feed beneath it. Voice toggle,
- * QR share, logs, and secondary controls all live behind the overflow menu.
+ * Pin-top mobile header zone: an h-14 bar (brand + freeze/flashlight quick
+ * toggles + overflow toggle) with the LIVE/facing/status badge row docked
+ * over the feed beneath it. The flashlight toggle hides while frozen
+ * (stopping the camera tracks kills the torch track, so it would be dead).
+ * Voice toggle, QR share, logs, and secondary controls all live behind the
+ * overflow menu, which closes after any item press (the inline Logs
+ * disclosure expands inside the menu instead).
  *
  * No backdrop-blur/transform on this tree by design: QrShare's share dialog
  * is `position: fixed`, and a filter would re-anchor it to the header.
@@ -57,6 +61,10 @@ export default function Header({
   hint,
 }: HeaderProps) {
   const [overflowOpen, setOverflowOpen] = useState(false)
+  // Tracks the QR dialog so QrShare stays mounted (trigger hidden) while its
+  // dialog is open even though opening it closes the overflow menu.
+  const [qrOpen, setQrOpen] = useState(false)
+  const closeOverflow = () => setOverflowOpen(false)
 
   return (
     <header
@@ -73,6 +81,32 @@ export default function Header({
         <span className="min-w-0 truncate text-xs font-bold tracking-wide text-white">
           WRENCHMIND
         </span>
+        {(live || frozen) && (
+          <button
+            type="button"
+            aria-label="Freeze frame"
+            aria-pressed={frozen}
+            onClick={() => onFreezeToggle(!frozen)}
+            className={`min-h-[48px] min-w-[48px] px-3 rounded-lg font-bold text-xl leading-none active:scale-95 transition ${
+              frozen ? 'bg-green-500 text-white' : 'bg-white/10 text-white'
+            }`}
+          >
+            <span aria-hidden="true">⏸</span>
+          </button>
+        )}
+        {hasTorch && !frozen && (
+          <button
+            type="button"
+            aria-label="Flashlight"
+            aria-pressed={torchOn}
+            onClick={() => onTorchToggle(!torchOn)}
+            className={`min-h-[48px] min-w-[48px] px-3 rounded-lg font-bold text-xl leading-none active:scale-95 transition ${
+              torchOn ? 'bg-green-500 text-white' : 'bg-white/10 text-white'
+            }`}
+          >
+            <span aria-hidden="true">🔦</span>
+          </button>
+        )}
         <div className="flex-1" aria-hidden="true" />
         <button
           type="button"
@@ -84,45 +118,78 @@ export default function Header({
           ⋯
         </button>
       </div>
-      {overflowOpen && (
+      {(overflowOpen || qrOpen) && (
         <div
-          className="absolute flex flex-col items-end gap-2 rounded-xl bg-black/90 border border-white/20 p-3"
-          style={{
-            top: 'calc(3.5rem + env(safe-area-inset-top))',
-            right: 'max(1rem, env(safe-area-inset-right))',
-          }}
+          className={
+            overflowOpen
+              ? 'absolute flex flex-col items-end gap-2 rounded-xl bg-black/90 border border-white/20 p-3'
+              : undefined
+          }
+          style={
+            overflowOpen
+              ? {
+                  top: 'calc(3.5rem + env(safe-area-inset-top))',
+                  right: 'max(1rem, env(safe-area-inset-right))',
+                }
+              : undefined
+          }
         >
-          <Toggle checked={voiceOn} onChange={onVoiceToggle} label="Voice mode" />
-          {hasTorch && <Toggle checked={torchOn} onChange={onTorchToggle} label="Flashlight" />}
-          <QrShare />
-          <LogPanel />
-          {(live || frozen) && (
-            <Toggle checked={frozen} onChange={onFreezeToggle} label="Freeze frame" />
+          {overflowOpen && (
+            <Toggle
+              checked={voiceOn}
+              onChange={(next) => {
+                onVoiceToggle(next)
+                closeOverflow()
+              }}
+              label="Voice mode"
+            />
           )}
-          {multiCamera && (
+          <QrShare
+            onOpen={() => {
+              setQrOpen(true)
+              closeOverflow()
+            }}
+            onClose={() => setQrOpen(false)}
+            hideTrigger={!overflowOpen}
+          />
+          {overflowOpen && <LogPanel />}
+          {overflowOpen && multiCamera && (
             <button
               type="button"
-              onClick={onSwitchCamera}
+              onClick={() => {
+                onSwitchCamera()
+                closeOverflow()
+              }}
               aria-label="Switch camera"
               className="min-h-[48px] bg-white/90 text-black px-4 py-3 rounded-lg font-bold shadow text-base active:scale-95 transition"
             >
               Switch camera
             </button>
           )}
-          <button
-            type="button"
-            onClick={onClearView}
-            className="min-h-[48px] bg-white/90 text-black px-4 py-3 rounded-lg font-bold shadow text-base active:scale-95 transition"
-          >
-            Clear AR View
-          </button>
-          <button
-            type="button"
-            onClick={onExportReport}
-            className="min-h-[48px] bg-white/90 text-black px-4 py-3 rounded-lg font-bold shadow text-base active:scale-95 transition"
-          >
-            Export Report
-          </button>
+          {overflowOpen && (
+            <button
+              type="button"
+              onClick={() => {
+                onClearView()
+                closeOverflow()
+              }}
+              className="min-h-[48px] bg-white/90 text-black px-4 py-3 rounded-lg font-bold shadow text-base active:scale-95 transition"
+            >
+              Clear AR View
+            </button>
+          )}
+          {overflowOpen && (
+            <button
+              type="button"
+              onClick={() => {
+                onExportReport()
+                closeOverflow()
+              }}
+              className="min-h-[48px] bg-white/90 text-black px-4 py-3 rounded-lg font-bold shadow text-base active:scale-95 transition"
+            >
+              Export Report
+            </button>
+          )}
         </div>
       )}
       <div

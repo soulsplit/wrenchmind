@@ -1,4 +1,5 @@
-import { logError, logWarn } from './logger'
+import { logError } from './logger'
+import { cleanString, errorDetail, fetchWithTimeout, isRecord } from './http'
 
 const SEARCH_BASE = 'https://www.ifixit.com/api/2.0/search/'
 const SEARCH_TIMEOUT_MS = 15000
@@ -28,27 +29,6 @@ export function buildQuery(phrase: string, label: string): string {
 /** Deep link to the iFixit site search for a query. */
 export function ifixitSearchUrl(query: string): string {
   return `https://www.ifixit.com/Search?query=${encodeURIComponent(query)}`
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null
-}
-
-/** Trimmed non-empty string, or null when the value is missing or blank. */
-function cleanString(value: unknown): string | null {
-  if (typeof value !== 'string') return null
-  const trimmed = value.trim()
-  return trimmed ? trimmed : null
-}
-
-/** Best-effort snippet of an HTTP error body for diagnosis (truncated). */
-async function errorDetail(res: Response): Promise<string> {
-  try {
-    const text = await res.text()
-    return text ? `: ${text.slice(0, 500)}` : ''
-  } catch {
-    return ''
-  }
 }
 
 const KEPT_KINDS = new Set(['guide', 'wiki', 'question'])
@@ -84,36 +64,29 @@ export async function searchGuides(
   const trimmed = query.trim()
   const count = Number.isFinite(limit) ? Math.max(0, Math.floor(limit)) : 0
   if (!trimmed || count === 0) return []
-  const controller = new AbortController()
-  const timer = setTimeout(() => {
-    logWarn('ifixit', `search timed out after ${SEARCH_TIMEOUT_MS}ms`)
-    controller.abort()
-  }, SEARCH_TIMEOUT_MS)
-  try {
-    const res = await fetch(`${SEARCH_BASE}${encodeURIComponent(trimmed)}`, {
-      signal: controller.signal,
-    })
-    if (!res.ok) {
-      const suffix = await errorDetail(res)
-      logError('ifixit', `search failed: HTTP ${res.status}${suffix}`)
-      throw new Error(`iFixit ${res.status}${suffix}`)
-    }
-    const data: unknown = await res.json()
-    if (!isRecord(data)) return []
-    const message = data['message']
-    if (typeof message === 'string' && message.trim()) throw new Error(message.trim())
-    const results = data['results']
-    if (!Array.isArray(results)) return []
-    const kept = results
-      .map((entry, index) => ({ guide: cleanGuide(entry), index }))
-      .filter((item): item is { guide: FixitGuide; index: number } => item.guide !== null)
-    kept.sort((a, b) => {
-      const rankA = a.guide.kind === 'question' ? 1 : 0
-      const rankB = b.guide.kind === 'question' ? 1 : 0
-      return rankA - rankB || a.index - b.index
-    })
-    return kept.slice(0, count).map((item) => item.guide)
-  } finally {
-    clearTimeout(timer)
+  const res = await fetchWithTimeout(
+    `${SEARCH_BASE}${encodeURIComponent(trimmed)}`,
+    {},
+    { timeoutMs: SEARCH_TIMEOUT_MS, tag: 'ifixit', label: 'search' },
+  )
+  if (!res.ok) {
+    const suffix = await errorDetail(res)
+    logError('ifixit', `search failed: HTTP ${res.status}${suffix}`)
+    throw new Error(`iFixit ${res.status}${suffix}`)
   }
+  const data: unknown = await res.json()
+  if (!isRecord(data)) return []
+  const message = data['message']
+  if (typeof message === 'string' && message.trim()) throw new Error(message.trim())
+  const results = data['results']
+  if (!Array.isArray(results)) return []
+  const kept = results
+    .map((entry, index) => ({ guide: cleanGuide(entry), index }))
+    .filter((item): item is { guide: FixitGuide; index: number } => item.guide !== null)
+  kept.sort((a, b) => {
+    const rankA = a.guide.kind === 'question' ? 1 : 0
+    const rankB = b.guide.kind === 'question' ? 1 : 0
+    return rankA - rankB || a.index - b.index
+  })
+  return kept.slice(0, count).map((item) => item.guide)
 }

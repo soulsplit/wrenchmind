@@ -39,15 +39,34 @@ function clearSavedUrl(): void {
   }
 }
 
+interface QrShareProps {
+  /** Invoked when the share dialog opens. */
+  onOpen?: () => void
+  /** Invoked when the share dialog closes. */
+  onClose?: () => void
+  /** Hides the QR trigger button; the dialog still renders when open. */
+  hideTrigger?: boolean
+}
+
 /**
  * Shows a QR code for opening the app on another device. Defaults to the
  * current page URL, but the user can paste an override (typically the
  * cloudflared tunnel URL) which is remembered across sessions.
  */
-export default function QrShare() {
+export default function QrShare({ onOpen, onClose, hideTrigger = false }: QrShareProps = {}) {
   const [open, setOpen] = useState(false)
   const [url, setUrl] = useState(() => loadSavedUrl() ?? window.location.href)
   const [draft, setDraft] = useState(() => loadSavedUrl() ?? window.location.href)
+
+  const openDialog = (): void => {
+    setOpen(true)
+    onOpen?.()
+  }
+
+  const closeDialog = (): void => {
+    setOpen(false)
+    onClose?.()
+  }
 
   useEffect(() => {
     if (!open) return
@@ -55,11 +74,14 @@ export default function QrShare() {
     setUrl(initial)
     setDraft(initial)
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false)
+      if (event.key === 'Escape') {
+        setOpen(false)
+        onClose?.()
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [open ])
+  }, [open, onClose])
 
   const onDraftChange = (value: string): void => {
     setDraft(value)
@@ -77,17 +99,19 @@ export default function QrShare() {
 
   return (
     <div className="flex flex-col items-start">
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        className="min-h-[48px] bg-white/90 text-black px-4 py-2 rounded-lg font-bold shadow text-base active:scale-95 transition"
-      >
-        QR
-      </button>
+      {!hideTrigger && (
+        <button
+          type="button"
+          onClick={openDialog}
+          className="min-h-[48px] bg-white/90 text-black px-4 py-2 rounded-lg font-bold shadow text-base active:scale-95 transition"
+        >
+          QR
+        </button>
+      )}
       {open && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
-          onClick={() => setOpen(false)}
+          onClick={closeDialog}
           role="presentation"
         >
           <div
@@ -136,7 +160,7 @@ export default function QrShare() {
             )}
             <button
               type="button"
-              onClick={() => setOpen(false)}
+              onClick={closeDialog}
               className="min-h-[48px] px-4 py-2 rounded-lg bg-black/90 text-white font-bold text-base"
             >
               Close

@@ -1,7 +1,8 @@
 /**
  * Warns when the shared URL won't work on a phone, or null when it will.
  * Localhost only works on the sharing device; plain LAN HTTP opens but
- * can't use the camera (secure-context requirement).
+ * can't use the camera (secure-context requirement). The tunnel flow this
+ * message points at is documented in the README's phone-testing notes.
  */
 export function getShareWarning(href: string): string | null {
   let url: URL

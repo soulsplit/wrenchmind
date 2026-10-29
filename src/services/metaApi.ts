@@ -1,11 +1,16 @@
 import type { MaskBox, SpatialResult } from '../types'
 import { buildObjectPrompt } from '@meta-sam/parser'
-import { logError, logWarn } from './logger'
+import { logError } from './logger'
+import { errorDetail, fetchWithTimeout } from './http'
 
 const BASE = 'https://api.meta.ai/v1'
 const REASON_TIMEOUT_MS = 30000
 const SEGMENT_TIMEOUT_MS = 60000
 
+/**
+ * Raw API key; undefined when unset (every caller must gate on hasApiKey()
+ * first — an unguarded call sends a literal "Bearer undefined" header).
+ */
 function key(): string {
   return import.meta.env.VITE_META_MODEL_API_KEY as string
 }
@@ -13,34 +18,6 @@ function key(): string {
 export function hasApiKey(): boolean {
   const value = import.meta.env.VITE_META_MODEL_API_KEY
   return typeof value === 'string' && value.length > 0
-}
-
-/** Best-effort snippet of an HTTP error body for diagnosis (truncated). */
-async function errorDetail(res: Response): Promise<string> {
-  try {
-    const text = await res.text()
-    return text ? `: ${text.slice(0, 500)}` : ''
-  } catch {
-    return ''
-  }
-}
-
-async function fetchWithTimeout(
-  url: string,
-  init: RequestInit,
-  timeoutMs: number,
-  label: string,
-): Promise<Response> {
-  const controller = new AbortController()
-  const timer = setTimeout(() => {
-    logWarn('api', `${label} timed out after ${timeoutMs}ms`)
-    controller.abort()
-  }, timeoutMs)
-  try {
-    return await fetch(url, { ...init, signal: controller.signal })
-  } finally {
-    clearTimeout(timer)
-  }
 }
 
 /**
@@ -73,12 +50,27 @@ export function captureDims(videoW: number, videoH: number): CaptureDims {
 }
 
 /**
- * Capture the current video frame as a base64 JPEG data URL, downscaled to
- * API_CAPTURE_MAX_SIDE on the longest side. Never upscales.
+ * Dimensions of a capture source: a live video element (videoWidth/Height)
+ * or a frozen-frame offscreen canvas (width/height). Duck-typed via `in`
+ * so plain test doubles keep working.
  */
-export function captureVideoFrame(video: HTMLVideoElement): string {
-  if (!video.videoWidth || !video.videoHeight) return ''
-  const cap = captureDims(video.videoWidth, video.videoHeight)
+export function sourceDims(source: HTMLVideoElement | HTMLCanvasElement): {
+  w: number
+  h: number
+} {
+  if ('videoWidth' in source) return { w: source.videoWidth, h: source.videoHeight }
+  return { w: source.width, h: source.height }
+}
+
+/**
+ * Capture the current video frame as a base64 JPEG data URL, downscaled to
+ * API_CAPTURE_MAX_SIDE on the longest side. Never upscales. Accepts a live
+ * video element or a frozen-frame offscreen canvas.
+ */
+export function captureVideoFrame(video: HTMLVideoElement | HTMLCanvasElement): string {
+  const { w, h } = sourceDims(video)
+  if (!w || !h) return ''
+  const cap = captureDims(w, h)
   const c = document.createElement('canvas')
   c.width = cap.width
   c.height = cap.height
@@ -97,12 +89,16 @@ export const BURST_INTERVAL_MS = 300
  * Capture the current frame downscaled to a small JPEG data URL for step
  * checkpoints. Never upscales; empty when no frame is available.
  */
-export function captureThumbnail(video: HTMLVideoElement, maxWidth = 320): string {
-  if (!video.videoWidth || !video.videoHeight) return ''
-  const scale = Math.min(1, maxWidth / video.videoWidth)
+export function captureThumbnail(
+  video: HTMLVideoElement | HTMLCanvasElement,
+  maxWidth = 320,
+): string {
+  const { w, h } = sourceDims(video)
+  if (!w || !h) return ''
+  const scale = Math.min(1, maxWidth / w)
   const c = document.createElement('canvas')
-  c.width = Math.max(1, Math.floor(video.videoWidth * scale))
-  c.height = Math.max(1, Math.floor(video.videoHeight * scale))
+  c.width = Math.max(1, Math.floor(w * scale))
+  c.height = Math.max(1, Math.floor(h * scale))
   const ctx = c.getContext('2d')
   if (!ctx) return ''
   ctx.drawImage(video, 0, 0, c.width, c.height)
@@ -110,18 +106,24 @@ export function captureThumbnail(video: HTMLVideoElement, maxWidth = 320): strin
 }
 
 /**
+ * Shortest side (px) of a crop sent to the identify/label APIs. Small
+ * objects arrive unreadable at native size, so tiny regions are upscaled
+ * to this minimum; larger crops are never downscaled.
+ */
+export const MIN_CROP_SIDE = 512
+
+/**
  * Crop a padded region around a mask box (inclusive corners) from the live
- * video frame. The padded region clamps to the frame edges; empty when no
+ * video frame or a frozen-frame canvas. The padded region clamps to the frame edges; empty when no
  * frame is available. Same canvas/toDataURL shape as captureThumbnail, with
  * a 9-arg drawImage selecting the source region.
  */
 export function cropRegion(
-  video: HTMLVideoElement,
+  video: HTMLVideoElement | HTMLCanvasElement,
   box: Pick<MaskBox, 'x1' | 'y1' | 'x2' | 'y2'>,
   padFraction = 0.2,
 ): string {
-  const vw = video.videoWidth
-  const vh = video.videoHeight
+  const { w: vw, h: vh } = sourceDims(video)
   if (!vw || !vh) return ''
   const w = Math.max(1, box.x2 - box.x1 + 1)
   const h = Math.max(1, box.y2 - box.y1 + 1)
@@ -133,18 +135,23 @@ export function cropRegion(
   const ey = Math.min(vh - 1, Math.max(0, box.y2 + padY))
   const sw = Math.max(1, ex - sx + 1)
   const sh = Math.max(1, ey - sy + 1)
+  // Small objects arrive unreadable at native crop size: upscale tiny
+  // regions to a legible minimum, never downscaling large crops.
+  const scale = Math.max(1, MIN_CROP_SIDE / Math.max(sw, sh))
+  const dw = Math.round(sw * scale)
+  const dh = Math.round(sh * scale)
   const c = document.createElement('canvas')
-  c.width = sw
-  c.height = sh
+  c.width = dw
+  c.height = dh
   const ctx = c.getContext('2d')
   if (!ctx) return ''
-  ctx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh)
+  ctx.drawImage(video, sx, sy, sw, sh, 0, 0, dw, dh)
   return c.toDataURL('image/jpeg', 0.8)
 }
 
 /** Capture a short burst of frames; empty captures are dropped. */
 export async function captureFrameBurst(
-  video: HTMLVideoElement,
+  video: HTMLVideoElement | HTMLCanvasElement,
   count: number = FRAME_BURST,
   intervalMs: number = BURST_INTERVAL_MS,
 ): Promise<string[]> {
@@ -157,7 +164,8 @@ export async function captureFrameBurst(
   return frames
 }
 
-function clampPct(n: unknown): number {
+/** Clamp model-emitted 0-100 pcts; non-numbers default to frame center. */
+function clampModelPct(n: unknown): number {
   if (typeof n !== 'number' || Number.isNaN(n)) return 50
   return Math.min(100, Math.max(0, n))
 }
@@ -216,8 +224,7 @@ export async function reasonSpatial(
       response_format: { type: 'json_object' },
       }),
     },
-    REASON_TIMEOUT_MS,
-    'muse-spark',
+    { timeoutMs: REASON_TIMEOUT_MS, tag: 'api', label: 'muse-spark' },
   )
   if (!res.ok) {
     const suffix = await errorDetail(res)
@@ -229,8 +236,8 @@ export async function reasonSpatial(
   const parsed = JSON.parse(text) as Partial<SpatialResult>
   return {
     target_label: typeof parsed.target_label === 'string' ? parsed.target_label : '',
-    approx_x: clampPct(parsed.approx_x),
-    approx_y: clampPct(parsed.approx_y),
+    approx_x: clampModelPct(parsed.approx_x),
+    approx_y: clampModelPct(parsed.approx_y),
     points: clampPoints(parsed.points),
     speech_response: typeof parsed.speech_response === 'string' ? parsed.speech_response : null,
     display_mode: parsed.display_mode === 'speech_and_visual' ? 'speech_and_visual' : 'visual_only',
@@ -276,8 +283,7 @@ export async function extractLabelText(image: string): Promise<string[]> {
         response_format: { type: 'json_object' },
       }),
     },
-    REASON_TIMEOUT_MS,
-    'muse-spark-labels',
+    { timeoutMs: REASON_TIMEOUT_MS, tag: 'api', label: 'muse-spark-labels' },
   )
   if (!res.ok) {
     const suffix = await errorDetail(res)
@@ -299,9 +305,11 @@ export async function extractLabelText(image: string): Promise<string[]> {
 export const MAX_IDENTIFY_LABEL = 80
 
 /**
- * Name the component visible in a cropped part image. Returns the short
- * part name, capped; empty only when no mechanical part is visible at all
- * (a generic category beats an empty label for downstream outline speech).
+ * Name the item visible in a cropped image: a mechanical or electronic
+ * part, a key, button, or control, or any everyday object. Returns the
+ * short name, capped; empty only when nothing identifiable is visible at
+ * all (a generic category beats an empty label for downstream outline
+ * speech).
  */
 export async function identifyComponent(image: string): Promise<string> {
   const res = await fetchWithTimeout(
@@ -318,7 +326,7 @@ export async function identifyComponent(image: string): Promise<string> {
           {
             role: 'system',
             content:
-              'You are a component identification assistant. Given a cropped image of a mechanical part, name the component. Return ONLY a JSON object: { "label": string } — the short part name (e.g. "M6 hex bolt", "wiring harness connector"). If unsure of the exact part, return the closest generic category (e.g. "bolt", "electrical connector", "hose", "bracket") rather than an empty string. Empty string only when no mechanical part is visible at all.',
+              'You are a component identification assistant. Given a cropped image, name the item visible: a mechanical part, an electronic part, a key, button, or control, or any everyday object (e.g. a PC keyboard key). Return ONLY a JSON object: { "label": string } — the short item name (e.g. "M6 hex bolt", "USB-C connector", "Enter key", "volume knob"). If unsure of the exact item, return the closest generic category (e.g. "bolt", "electrical connector", "keyboard key", "button", "hose", "bracket") rather than an empty string. Empty string only when nothing identifiable is visible at all.',
           },
           {
             role: 'user',
@@ -331,8 +339,7 @@ export async function identifyComponent(image: string): Promise<string> {
         response_format: { type: 'json_object' },
       }),
     },
-    REASON_TIMEOUT_MS,
-    'muse-spark-identify',
+    { timeoutMs: REASON_TIMEOUT_MS, tag: 'api', label: 'muse-spark-identify' },
   )
   if (!res.ok) {
     const suffix = await errorDetail(res)
@@ -498,8 +505,7 @@ export async function* segmentImage(
       metadata: { mask_encoding: 'one_bit' },
       }),
     },
-    SEGMENT_TIMEOUT_MS,
-    'sam-3.1',
+    { timeoutMs: SEGMENT_TIMEOUT_MS, tag: 'api', label: 'sam-3.1' },
   )
   if (!res.ok) {
     const suffix = await errorDetail(res)

@@ -137,7 +137,15 @@ function mockCamera(granted: boolean, devices: { kind: string }[] = []): Mock {
 }
 
 function openOverflow(): void {
+  // Idempotent: the menu closes after every item press, so only toggle it
+  // open when a menu-only item (Voice mode) is not already visible.
+  if (screen.queryByRole('switch', { name: 'Voice mode' })) return
   fireEvent.click(screen.getByRole('button', { name: 'More options' }))
+}
+
+/** Press the top-bar Freeze frame quick toggle (lives outside the overflow menu). */
+function pressFreezeFrame(): void {
+  fireEvent.click(screen.getByRole('button', { name: 'Freeze frame' }))
 }
 
 async function enableVoiceMode(): Promise<void> {
@@ -182,6 +190,28 @@ function mockCameraStream(stream: MediaStream): void {
   })
 }
 
+/** Fresh stream whose getTracks() returns a stoppable fake track (FAKE_STREAM has none). */
+function trackedStream(): { stream: MediaStream; stop: Mock } {
+  const stop = vi.fn()
+  const stream = new MediaStream()
+  const track = {
+    stop,
+    getSettings: () => ({ facingMode: 'environment' }),
+  } as unknown as MediaStreamTrack
+  stream.getTracks = () => [track]
+  stream.getVideoTracks = () => [track]
+  return { stream, stop }
+}
+
+function mockCameraWithStream(stream: MediaStream): Mock {
+  const getUserMedia = vi.fn(async (): Promise<MediaStream> => stream)
+  Object.defineProperty(navigator, 'mediaDevices', {
+    value: { getUserMedia, enumerateDevices: vi.fn(async () => []) },
+    configurable: true,
+  })
+  return getUserMedia
+}
+
 function captureDownload(): { blob: Blob | null } {
   const captured: { blob: Blob | null } = { blob: null }
   Object.defineProperty(URL, 'createObjectURL', {
@@ -220,9 +250,14 @@ function mockCanvas2d(): () => void {
   return () => ctxSpy.mockRestore()
 }
 
-function setVideoDims(container: HTMLElement, w = 640, h = 480): void {
+function getVideo(container: HTMLElement): HTMLVideoElement {
   const video = container.querySelector('video')
   if (!video) throw new Error('missing video element')
+  return video
+}
+
+function setVideoDims(container: HTMLElement, w = 640, h = 480): void {
+  const video = getVideo(container)
   Object.defineProperty(video, 'videoWidth', { value: w, configurable: true })
   Object.defineProperty(video, 'videoHeight', { value: h, configurable: true })
 }
@@ -319,6 +354,7 @@ describe('Scanner', () => {
         },
       }),
     )
+    openOverflow()
     fireEvent.click(screen.getByRole('button', { name: 'Switch camera' }))
     await waitFor(() =>
       expect(getUserMedia).toHaveBeenCalledTimes(3),
@@ -462,8 +498,10 @@ describe('Scanner', () => {
     fireEvent.click(toggle)
     expect(await screen.findByText('[ 🟢 LISTENING... ]')).toBeInTheDocument()
     expect(assistants[0].start).toHaveBeenCalledTimes(1)
+    openOverflow()
     fireEvent.click(screen.getByRole('switch', { name: 'Voice mode' }))
     expect(screen.queryByText('[ OFF ]')).not.toBeInTheDocument()
+    openOverflow()
     expect(screen.getByRole('switch', { name: 'Voice mode' })).toHaveAttribute('aria-checked', 'false')
     expect(assistants[0].stop).toHaveBeenCalledTimes(1)
   })
@@ -479,6 +517,7 @@ describe('Scanner', () => {
     })
     expect(await screen.findByRole('alert')).toHaveTextContent('Microphone access denied')
     expect(screen.queryByText('[ OFF ]')).not.toBeInTheDocument()
+    openOverflow()
     expect(screen.getByRole('switch', { name: 'Voice mode' })).toHaveAttribute('aria-checked', 'false')
   })
 
@@ -935,6 +974,7 @@ describe('Scanner', () => {
       expect(await screen.findByText('Step 2 of 3')).toBeInTheDocument()
       openOverflow()
       fireEvent.click(screen.getByText('Clear AR View'))
+      openOverflow()
       fireEvent.click(screen.getByText('Export Report'))
       await waitFor(() => expect(captured.blob).not.toBeNull())
       await expect(captured.blob?.text()).resolves.not.toContain('<img')
@@ -979,49 +1019,46 @@ describe('Scanner', () => {
     const { stream } = torchStream()
     mockCameraStream(stream)
     render(<Scanner />)
-    openOverflow()
-    const toggle = await screen.findByRole('switch', { name: 'Flashlight' })
-    expect(toggle).not.toBeChecked()
+    const toggle = await screen.findByRole('button', { name: 'Flashlight' })
+    expect(toggle).toHaveAttribute('aria-pressed', 'false')
   })
 
   it('toggles torch via applyConstraints', async () => {
     const { stream, applyConstraints } = torchStream()
     mockCameraStream(stream)
     render(<Scanner />)
-    openOverflow()
-    const toggle = await screen.findByRole('switch', { name: 'Flashlight' })
+    const toggle = await screen.findByRole('button', { name: 'Flashlight' })
     fireEvent.click(toggle)
     await waitFor(() =>
       expect(applyConstraints).toHaveBeenCalledWith({ advanced: [{ torch: true }] }),
     )
-    expect(toggle).toBeChecked()
+    expect(toggle).toHaveAttribute('aria-pressed', 'true')
     fireEvent.click(toggle)
     await waitFor(() =>
       expect(applyConstraints).toHaveBeenCalledWith({ advanced: [{ torch: false }] }),
     )
-    expect(toggle).not.toBeChecked()
+    expect(toggle).toHaveAttribute('aria-pressed', 'false')
   })
 
   it('hides the flashlight toggle without torch support', async () => {
     mockCamera(true)
     render(<Scanner />)
-    openOverflow()
     expect(await screen.findByText('LIVE')).toBeInTheDocument()
-    expect(screen.queryByRole('switch', { name: 'Flashlight' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Flashlight' })).not.toBeInTheDocument()
   })
 
   it('turns torch off when the new camera lacks it', async () => {
     const { stream } = torchStream()
     mockCameraStream(stream)
     render(<Scanner />)
-    openOverflow()
-    const toggle = await screen.findByRole('switch', { name: 'Flashlight' })
+    const toggle = await screen.findByRole('button', { name: 'Flashlight' })
     fireEvent.click(toggle)
-    await waitFor(() => expect(toggle).toBeChecked())
+    await waitFor(() => expect(toggle).toHaveAttribute('aria-pressed', 'true'))
     mockCamera(true)
+    openOverflow()
     fireEvent.click(screen.getByRole('button', { name: 'Switch camera' }))
     await waitFor(() => {
-      expect(screen.queryByRole('switch', { name: 'Flashlight' })).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'Flashlight' })).not.toBeInTheDocument()
     })
   })
 
@@ -1031,13 +1068,12 @@ describe('Scanner', () => {
     })
     mockCameraStream(stream)
     render(<Scanner />)
-    openOverflow()
-    const toggle = await screen.findByRole('switch', { name: 'Flashlight' })
+    const toggle = await screen.findByRole('button', { name: 'Flashlight' })
     fireEvent.click(toggle)
     await waitFor(() => {
       expect(getLogs().some((e) => e.message.includes('flashlight'))).toBe(true)
     })
-    expect(toggle).not.toBeChecked()
+    expect(toggle).toHaveAttribute('aria-pressed', 'false')
   })
 
   it('fetches iFixit guides on scan and shows them in the card', async () => {
@@ -1254,8 +1290,12 @@ describe('Scanner', () => {
 
   it('numbers each isolated instance on the canvas', async () => {
     const fillText = vi.fn()
+    const fillRect = vi.fn()
+    const drawImage = vi.fn()
+    const compositeOps: string[] = []
+    const fillStyles: string[] = []
     const ctx = new Proxy(
-      { marker: 'ctx', fillText, measureText: () => ({ width: 10 }) },
+      { marker: 'ctx', fillText, fillRect, drawImage, measureText: () => ({ width: 10 }) },
       {
         get: (target, prop) => {
           if (prop === 'createImageData') {
@@ -1268,7 +1308,11 @@ describe('Scanner', () => {
           const value = (target as Record<PropertyKey, unknown>)[prop]
           return value ?? (() => undefined)
         },
-        set: () => true,
+        set: (target, prop, value) => {
+          if (prop === 'globalCompositeOperation') compositeOps.push(value as string)
+          if (prop === 'fillStyle') fillStyles.push(value as string)
+          return Reflect.set(target as object, prop, value)
+        },
       },
     )
     const ctxSpy = vi
@@ -1310,6 +1354,13 @@ describe('Scanner', () => {
       await screen.findByText('2 × Bolt')
       expect(fillText).toHaveBeenCalledWith('1', expect.any(Number), expect.any(Number))
       expect(fillText).toHaveBeenCalledWith('2', expect.any(Number), expect.any(Number))
+      // Spotlight: full-frame dim, raster holes punched via drawImage.
+      expect(fillStyles).toContain('rgba(0, 0, 0, 0.55)')
+      expect(fillRect).toHaveBeenCalledWith(0, 0, window.innerWidth, window.innerHeight)
+      expect(drawImage).toHaveBeenCalledWith(expect.anything(), 0, 40)
+      expect(drawImage).toHaveBeenCalledWith(expect.anything(), 4, 40)
+      expect(compositeOps[0]).toBe('destination-out')
+      expect(compositeOps[compositeOps.length - 1]).toBe('source-over')
     } finally {
       ctxSpy.mockRestore()
     }
@@ -1442,9 +1493,15 @@ describe('Scanner', () => {
       })
       expect(segmentImage).toHaveBeenCalledTimes(1)
       await act(async () => {
+        openOverflow()
+      })
+      await act(async () => {
         fireEvent.click(screen.getByRole('switch', { name: 'Voice mode' }))
       })
       expect(screen.queryByText('[ OFF ]')).not.toBeInTheDocument()
+      await act(async () => {
+        openOverflow()
+      })
       expect(screen.getByRole('switch', { name: 'Voice mode' })).toHaveAttribute('aria-checked', 'false')
       await act(async () => {
         await vi.advanceTimersByTimeAsync(10000)
@@ -1904,8 +1961,9 @@ describe('Scanner', () => {
 
   it('skips canvas churn when idle and already sized', async () => {
     const clearRect = vi.fn()
+    const fillRect = vi.fn()
     const ctx = new Proxy(
-      { marker: 'ctx' },
+      { marker: 'ctx', fillRect },
       {
         get: (target, prop) => {
           if (prop === 'clearRect') return clearRect
@@ -1934,6 +1992,8 @@ describe('Scanner', () => {
         assistants[0].callbacks.onPhrase('second')
       })
       expect(clearRect).toHaveBeenCalledTimes(1)
+      // Idle: no overlays, so no spotlight dim fill.
+      expect(fillRect).not.toHaveBeenCalled()
     } finally {
       ctxSpy.mockRestore()
     }
@@ -2307,12 +2367,11 @@ describe('Scanner freeze frame', () => {
 
   async function freezeFrame(): Promise<void> {
     await waitForLive()
-    openOverflow()
-    fireEvent.click(screen.getByRole('switch', { name: 'Freeze frame' }))
+    pressFreezeFrame()
   }
 
   function tapTarget(): HTMLElement {
-    return screen.getByLabelText('Frozen frame: circle or tap to identify a part')
+    return screen.getByLabelText('Circle or tap to identify a part')
   }
 
   function setTapRect(
@@ -2347,19 +2406,24 @@ describe('Scanner freeze frame', () => {
     }
   }
 
-  it('shows no tap layer while the feed is live', () => {
+  it('shows the tap layer while the feed is live', async () => {
     mockCamera(true)
-    render(<Scanner />)
-    expect(
-      screen.queryByLabelText('Frozen frame: circle or tap to identify a part'),
-    ).not.toBeInTheDocument()
+    const media = mockMediaControls()
+    try {
+      render(<Scanner />)
+      await waitForLive()
+      expect(tapTarget()).toBeInTheDocument()
+    } finally {
+      media.restore()
+    }
   })
 
   it('freezing pauses the video and stops refresh ticks while masks persist', async () => {
     vi.useFakeTimers()
     const media = mockMediaControls()
     try {
-      mockCamera(true)
+      const { stream, stop } = trackedStream()
+      mockCameraWithStream(stream)
       vi.mocked(reasonSpatial).mockResolvedValue({
         target_label: 'Screw',
         approx_x: 10,
@@ -2367,15 +2431,19 @@ describe('Scanner freeze frame', () => {
         speech_response: null,
         display_mode: 'visual_only',
       })
-      render(<Scanner />)
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
       await act(async () => {
         assistants[0].callbacks.onPhrase('show screws')
       })
       expect(screen.getByText('Screw')).toBeInTheDocument()
       expect(segmentImage).toHaveBeenCalledTimes(1)
-      media.pause.mockClear()
       await freezeFrame()
-      expect(media.pause).toHaveBeenCalledTimes(1)
+      // Freeze snapshots a still and stops the tracks; the video is never paused.
+      expect(media.pause).not.toHaveBeenCalled()
+      expect(stop).toHaveBeenCalledTimes(1)
+      expect(getVideo(container).srcObject).toBeNull()
+      expect(screen.getByAltText('Frozen frame')).toBeInTheDocument()
       expect(screen.getByText('FROZEN')).toBeInTheDocument()
       expect(screen.queryByText('LIVE')).not.toBeInTheDocument()
       await act(async () => {
@@ -2389,7 +2457,7 @@ describe('Scanner freeze frame', () => {
     }
   })
 
-  it('resuming plays the video and re-arms refresh for the tracked target', async () => {
+  it('resuming wipes AR annotations without re-arming refresh', async () => {
     vi.useFakeTimers()
     const media = mockMediaControls()
     try {
@@ -2401,21 +2469,38 @@ describe('Scanner freeze frame', () => {
         speech_response: null,
         display_mode: 'visual_only',
       })
-      render(<Scanner />)
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
       await act(async () => {
         assistants[0].callbacks.onPhrase('show screws')
       })
+      expect(screen.getByText('Screw')).toBeInTheDocument()
+      expect(screen.getByText('Tracking')).toBeInTheDocument()
+      expect(segmentImage).toHaveBeenCalledTimes(1)
       await freezeFrame()
-      expect(screen.getByText('FROZEN')).toBeInTheDocument()
-      media.play.mockClear()
-      fireEvent.click(screen.getByRole('switch', { name: 'Freeze frame' }))
-      expect(media.play).toHaveBeenCalledTimes(1)
-      expect(screen.queryByText('FROZEN')).not.toBeInTheDocument()
+      expect(screen.getByText('Screw')).toBeInTheDocument()
+      // Frozen-scene paint is stale once live: the wipe forces a full clear.
+      const clearRect = vi.fn()
+      const ctxSpy = vi
+        .spyOn(window.HTMLCanvasElement.prototype, 'getContext')
+        .mockReturnValue({ clearRect } as unknown as CanvasRenderingContext2D)
+      try {
+        pressFreezeFrame()
+        await waitForLive()
+      } finally {
+        ctxSpy.mockRestore()
+      }
+      expect(clearRect).toHaveBeenCalledWith(0, 0, 640, 480)
+      expect(screen.queryByText('Screw')).not.toBeInTheDocument()
+      expect(screen.queryByText('Tracking')).not.toBeInTheDocument()
+      expect(
+        getLogs().some((e) => e.message.includes('frame live — AR annotations cleared')),
+      ).toBe(true)
       expect(segmentImage).toHaveBeenCalledTimes(1)
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(2100)
+        await vi.advanceTimersByTimeAsync(10000)
       })
-      expect(segmentImage).toHaveBeenCalledTimes(2)
+      expect(segmentImage).toHaveBeenCalledTimes(1)
     } finally {
       media.restore()
       vi.useRealTimers()
@@ -2429,7 +2514,7 @@ describe('Scanner freeze frame', () => {
       mockCamera(true)
       render(<Scanner />)
       await freezeFrame()
-      fireEvent.click(screen.getByRole('switch', { name: 'Freeze frame' }))
+      pressFreezeFrame()
       await act(async () => {
         await vi.advanceTimersByTimeAsync(10000)
       })
@@ -2447,6 +2532,7 @@ describe('Scanner freeze frame', () => {
       const { container } = render(<Scanner />)
       setVideoDims(container, 640, 480)
       await freezeFrame()
+      openOverflow()
       fireEvent.click(screen.getByRole('switch', { name: 'Voice mode' }))
       await act(async () => {})
       const layer = tapTarget()
@@ -2498,6 +2584,7 @@ describe('Scanner freeze frame', () => {
       const { container } = render(<Scanner />)
       setVideoDims(container, 640, 480)
       await freezeFrame()
+      openOverflow()
       fireEvent.click(screen.getByRole('switch', { name: 'Voice mode' }))
       await act(async () => {})
       const layer = tapTarget()
@@ -2526,8 +2613,12 @@ describe('Scanner freeze frame', () => {
 
   it('falls back to a tap-centered crop when SAM returns no masks', async () => {
     const strokeRect = vi.fn()
+    const fillRect = vi.fn()
+    const drawImage = vi.fn()
+    const compositeOps: string[] = []
+    const fillStyles: string[] = []
     const ctx = new Proxy(
-      { marker: 'ctx', strokeRect, measureText: () => ({ width: 10 }) },
+      { marker: 'ctx', strokeRect, fillRect, drawImage, measureText: () => ({ width: 10 }) },
       {
         get: (target, prop) => {
           if (prop === 'createImageData') {
@@ -2539,7 +2630,11 @@ describe('Scanner freeze frame', () => {
           }
           return (target as Record<PropertyKey, unknown>)[prop] ?? (() => undefined)
         },
-        set: () => true,
+        set: (target, prop, value) => {
+          if (prop === 'globalCompositeOperation') compositeOps.push(value as string)
+          if (prop === 'fillStyle') fillStyles.push(value as string)
+          return Reflect.set(target as object, prop, value)
+        },
       },
     )
     const ctxSpy = vi
@@ -2552,11 +2647,15 @@ describe('Scanner freeze frame', () => {
       const { container } = render(<Scanner />)
       setVideoDims(container, 640, 480)
       await freezeFrame()
+      openOverflow()
       fireEvent.click(screen.getByRole('switch', { name: 'Voice mode' }))
       await act(async () => {})
       const layer = tapTarget()
       setTapRect(layer)
       vi.mocked(parseSamStream).mockResolvedValueOnce([])
+      // Freeze snapshots via drawImage: clear it so the not-called assertion
+      // below covers only the SAM/identify path.
+      drawImage.mockClear()
       await act(async () => {
         fireEvent.click(layer, { clientX: 320, clientY: 220 })
       })
@@ -2568,6 +2667,18 @@ describe('Scanner freeze frame', () => {
       expect(box.y1).toBeLessThanOrEqual(220)
       expect(box.y2).toBeGreaterThanOrEqual(220)
       expect(strokeRect).toHaveBeenCalled()
+      // Spotlight: full-frame dim plus a mask-less box hole via fillRect.
+      expect(fillStyles).toContain('rgba(0, 0, 0, 0.55)')
+      expect(fillRect).toHaveBeenCalledWith(0, 0, 640, 480)
+      expect(fillRect).toHaveBeenCalledWith(
+        box.x1,
+        box.y1,
+        box.x2 - box.x1 + 1,
+        box.y2 - box.y1 + 1,
+      )
+      expect(drawImage).not.toHaveBeenCalled()
+      expect(compositeOps[0]).toBe('destination-out')
+      expect(compositeOps[compositeOps.length - 1]).toBe('source-over')
       expect(speakText).toHaveBeenCalledWith('Blend door')
     } finally {
       media.restore()
@@ -2801,19 +2912,24 @@ describe('Scanner freeze frame', () => {
   })
 
   it('resumes the feed when flipping cameras while frozen', async () => {
-    mockCamera(true)
+    const { stream } = trackedStream()
+    const getUserMedia = mockCameraWithStream(stream)
     const media = mockMediaControls()
     try {
-      render(<Scanner />)
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
       expect(await screen.findByText('LIVE')).toBeInTheDocument()
       await freezeFrame()
-      expect(media.pause).toHaveBeenCalledTimes(1)
       expect(screen.getByText('FROZEN')).toBeInTheDocument()
-      media.play.mockClear()
+      expect(screen.getByAltText('Frozen frame')).toBeInTheDocument()
+      expect(getUserMedia).toHaveBeenCalledTimes(1)
+      openOverflow()
       fireEvent.click(screen.getByRole('button', { name: 'Switch camera' }))
-      expect(media.play).toHaveBeenCalled()
+      // Flip clears the still at once and re-acquires exactly once.
       expect(screen.queryByText('FROZEN')).not.toBeInTheDocument()
+      expect(screen.queryByAltText('Frozen frame')).not.toBeInTheDocument()
       expect(await screen.findByText('LIVE')).toBeInTheDocument()
+      expect(getUserMedia).toHaveBeenCalledTimes(2)
     } finally {
       media.restore()
     }
@@ -2843,7 +2959,7 @@ describe('Scanner freeze frame', () => {
       fireEvent.click(screen.getByRole('switch', { name: 'Voice mode' }))
       expect(await screen.findByText('[ 🟢 LISTENING... ]')).toBeInTheDocument()
       await waitForLive()
-      fireEvent.click(screen.getByRole('switch', { name: 'Freeze frame' }))
+      pressFreezeFrame()
       const layer = tapTarget()
       setTapRect(layer)
       await act(async () => {
@@ -3096,17 +3212,20 @@ describe('Scanner freeze frame', () => {
     }
   })
 
-  it('shows the circle hint while frozen and hides it when live', async () => {
+  it('shows the circle hint while live and frozen', async () => {
     mockCamera(true)
     const media = mockMediaControls()
     try {
       render(<Scanner />)
       expect(screen.queryByText('Drag to circle a part · tap to identify')).not.toBeInTheDocument()
-      await freezeFrame()
+      await waitForLive()
       expect(screen.getByText('Drag to circle a part · tap to identify')).toBeInTheDocument()
-      fireEvent.click(screen.getByRole('switch', { name: 'Freeze frame' }))
+      pressFreezeFrame()
+      expect(await screen.findByText('FROZEN')).toBeInTheDocument()
+      expect(screen.getByText('Drag to circle a part · tap to identify')).toBeInTheDocument()
+      pressFreezeFrame()
       expect(await screen.findByText('LIVE')).toBeInTheDocument()
-      expect(screen.queryByText('Drag to circle a part · tap to identify')).not.toBeInTheDocument()
+      expect(screen.getByText('Drag to circle a part · tap to identify')).toBeInTheDocument()
     } finally {
       media.restore()
     }
@@ -3163,6 +3282,487 @@ describe('Scanner freeze frame', () => {
         'tapped part',
         { x: 960, y: 540, width: 1920, height: 1080 },
       )
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('stops every track and clears srcObject when freezing', async () => {
+    const { stream, stop } = trackedStream()
+    mockCameraWithStream(stream)
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      expect(stop).toHaveBeenCalledTimes(1)
+      expect(getVideo(container).srcObject).toBeNull()
+      expect(media.pause).not.toHaveBeenCalled()
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('re-acquires the camera with getUserMedia on unfreeze', async () => {
+    const { stream } = trackedStream()
+    const getUserMedia = mockCameraWithStream(stream)
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      expect(getUserMedia).toHaveBeenCalledTimes(1)
+      pressFreezeFrame()
+      expect(await screen.findByText('LIVE')).toBeInTheDocument()
+      expect(getUserMedia).toHaveBeenCalledTimes(2)
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('renders the frozen still while frozen and clears it once live', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await waitForLive()
+      expect(screen.queryByAltText('Frozen frame')).not.toBeInTheDocument()
+      pressFreezeFrame()
+      expect(screen.getByAltText('Frozen frame')).toBeInTheDocument()
+      pressFreezeFrame()
+      expect(await screen.findByText('LIVE')).toBeInTheDocument()
+      expect(screen.queryByAltText('Frozen frame')).not.toBeInTheDocument()
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('identifies a frozen tap against the still with the stream stopped', async () => {
+    const { stream, stop } = trackedStream()
+    mockCameraWithStream(stream)
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      expect(stop).toHaveBeenCalledTimes(1)
+      expect(getVideo(container).srcObject).toBeNull()
+      const layer = tapTarget()
+      setTapRect(layer)
+      vi.mocked(parseSamStream).mockResolvedValueOnce([
+        maskRecord({ x1: 300, y1: 200, x2: 340, y2: 240, w: 41, h: 41 }),
+      ])
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 320, clientY: 220 })
+      })
+      expect(await screen.findByText('M6 hex bolt')).toBeInTheDocument()
+      // The frame source is the still canvas, not the video element.
+      const frameEl = vi.mocked(captureVideoFrame).mock.calls[0][0] as HTMLElement
+      expect(frameEl.tagName).toBe('CANVAS')
+      const cropEl = vi.mocked(cropRegion).mock.calls[0][0] as HTMLElement
+      expect(cropEl.tagName).toBe('CANVAS')
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('keeps the still with an error when camera restart fails', async () => {
+    const getUserMedia = vi.fn(async (): Promise<MediaStream> => {
+      // First call opens the camera; every re-acquire attempt fails.
+      if (getUserMedia.mock.calls.length > 1) throw new Error('denied')
+      return FAKE_STREAM
+    })
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: { getUserMedia, enumerateDevices: vi.fn(async () => []) },
+      configurable: true,
+    })
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      expect(screen.getByAltText('Frozen frame')).toBeInTheDocument()
+      pressFreezeFrame()
+      // The still is kept (never a black flash) with the failure surfaced.
+      expect(await screen.findByRole('alert')).toHaveTextContent('Camera access denied')
+      expect(screen.getByAltText('Frozen frame')).toBeInTheDocument()
+      expect(screen.queryByText('LIVE')).not.toBeInTheDocument()
+      // Failed restart falls back to frozen: the still stays tappable and
+      // the toggle is back so unfreezing retries the camera.
+      expect(screen.getByText('FROZEN')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Freeze frame' })).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      )
+      const attempts = getUserMedia.mock.calls.length
+      pressFreezeFrame()
+      await waitFor(() => expect(getUserMedia.mock.calls.length).toBeGreaterThan(attempts))
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('forces torch off when freezing', async () => {
+    const { stream } = torchStream()
+    mockCameraStream(stream)
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      const toggle = await screen.findByRole('button', { name: 'Flashlight' })
+      fireEvent.click(toggle)
+      await waitFor(() => expect(toggle).toHaveAttribute('aria-pressed', 'true'))
+      await freezeFrame()
+      expect(screen.getByText('FROZEN')).toBeInTheDocument()
+      expect(
+        getLogs().some((e) => e.message.includes('flashlight off (freeze stopped the camera)')),
+      ).toBe(true)
+      expect(screen.queryByRole('button', { name: 'Flashlight' })).not.toBeInTheDocument()
+      pressFreezeFrame()
+      expect(await screen.findByText('LIVE')).toBeInTheDocument()
+      expect(await screen.findByRole('button', { name: 'Flashlight' })).toHaveAttribute(
+        'aria-pressed',
+        'false',
+      )
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('unfreezing after a tap wipes paint, callout, and tracking with no further ticks', async () => {
+    vi.useFakeTimers()
+    const media = mockMediaControls()
+    try {
+      mockCamera(true)
+      vi.mocked(reasonSpatial).mockResolvedValue({
+        target_label: 'Screw',
+        approx_x: 10,
+        approx_y: 10,
+        speech_response: null,
+        display_mode: 'visual_only',
+      })
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('show screws')
+      })
+      expect(screen.getByText('Screw')).toBeInTheDocument()
+      expect(screen.getByText('Tracking')).toBeInTheDocument()
+      await freezeFrame()
+      const layer = tapTarget()
+      setTapRect(layer)
+      vi.mocked(parseSamStream).mockResolvedValueOnce([
+        maskRecord({ x1: 300, y1: 200, x2: 340, y2: 240, w: 41, h: 41 }),
+      ])
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 320, clientY: 220 })
+      })
+      expect(screen.getByText('M6 hex bolt')).toBeInTheDocument()
+      const segments = vi.mocked(segmentImage).mock.calls.length
+      expect(segments).toBe(2)
+      const clearRect = vi.fn()
+      const ctxSpy = vi
+        .spyOn(window.HTMLCanvasElement.prototype, 'getContext')
+        .mockReturnValue({ clearRect } as unknown as CanvasRenderingContext2D)
+      try {
+        pressFreezeFrame()
+        await waitForLive()
+      } finally {
+        ctxSpy.mockRestore()
+      }
+      expect(clearRect).toHaveBeenCalledWith(0, 0, 640, 480)
+      expect(screen.queryByText('M6 hex bolt')).not.toBeInTheDocument()
+      expect(screen.queryByText('Tracking')).not.toBeInTheDocument()
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10000)
+      })
+      expect(segmentImage).toHaveBeenCalledTimes(segments)
+    } finally {
+      media.restore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('preserves guidance HUD and findings chips across unfreeze', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      vi.mocked(reasonSpatial).mockResolvedValue({
+        target_label: 'Screw',
+        approx_x: 10,
+        approx_y: 10,
+        speech_response: null,
+        display_mode: 'visual_only',
+      })
+      vi.mocked(fetchGuidance).mockResolvedValue(validGuidanceFixture)
+      vi.mocked(extractLabelText).mockResolvedValue(['ABC-123'])
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('show screws')
+      })
+      expect(await screen.findByText('Remove the belt cover')).toBeInTheDocument()
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('read this label')
+      })
+      expect(await screen.findByText('ABC-123')).toBeInTheDocument()
+      await freezeFrame()
+      pressFreezeFrame()
+      expect(await screen.findByText('LIVE')).toBeInTheDocument()
+      // Job data survives; only AR annotations were wiped.
+      expect(screen.getByText('Remove the belt cover')).toBeInTheDocument()
+      expect(screen.getByText('ABC-123')).toBeInTheDocument()
+      expect(screen.queryByText('Screw')).not.toBeInTheDocument()
+    } finally {
+      media.restore()
+    }
+  })
+})
+
+describe('Scanner live gestures', () => {
+  async function waitForLive(): Promise<void> {
+    for (let i = 0; i < 100 && !screen.queryByText('LIVE'); i++) {
+      await act(async () => {})
+    }
+    expect(screen.getByText('LIVE')).toBeInTheDocument()
+  }
+
+  function tapTarget(): HTMLElement {
+    return screen.getByLabelText('Circle or tap to identify a part')
+  }
+
+  function setTapRect(
+    el: HTMLElement,
+    rect: { left: number; top: number; width: number; height: number } = {
+      left: 0,
+      top: 0,
+      width: 640,
+      height: 480,
+    },
+  ): void {
+    Object.defineProperty(el, 'getBoundingClientRect', {
+      value: () => ({
+        ...rect,
+        x: rect.left,
+        y: rect.top,
+        right: rect.left + rect.width,
+        bottom: rect.top + rect.height,
+        toJSON: () => ({}),
+      }),
+      configurable: true,
+    })
+  }
+
+  function maskRecord(box: MaskRecord['box'], objectId = '0'): MaskRecord {
+    return {
+      frame: 0,
+      ordinal: 0,
+      objectId,
+      box,
+      raster: Uint8Array.from([1, 0, 0, 0]),
+    }
+  }
+
+  function setStageDims(w: number, h: number): void {
+    const stage = screen.getByTestId('zoom-stage')
+    Object.defineProperty(stage, 'clientWidth', { value: w, configurable: true })
+    Object.defineProperty(stage, 'clientHeight', { value: h, configurable: true })
+  }
+
+  function traceLoop(layer: HTMLElement, x1: number, y1: number, x2: number, y2: number): void {
+    fireEvent.pointerDown(layer, { pointerId: 1, clientX: x1, clientY: y1 })
+    fireEvent.pointerMove(layer, { pointerId: 1, clientX: x2, clientY: y1 })
+    fireEvent.pointerMove(layer, { pointerId: 1, clientX: x2, clientY: y2 })
+    fireEvent.pointerMove(layer, { pointerId: 1, clientX: x1, clientY: y2 })
+    fireEvent.pointerMove(layer, { pointerId: 1, clientX: x1, clientY: y1 })
+    fireEvent.pointerUp(layer, { pointerId: 1, clientX: x1, clientY: y1 })
+  }
+
+  it('identifies a live tap with outline, badge, and callout', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    const fillText = vi.fn()
+    const ctx = new Proxy(
+      { marker: 'ctx', fillText, measureText: () => ({ width: 10 }) },
+      {
+        get: (target, prop) => {
+          if (prop === 'createImageData') {
+            return (w: number, h: number) => ({
+              data: new Uint8ClampedArray(w * h * 4),
+              width: w,
+              height: h,
+            })
+          }
+          const value = (target as Record<PropertyKey, unknown>)[prop]
+          return value ?? (() => undefined)
+        },
+        set: () => true,
+      },
+    )
+    const ctxSpy = vi
+      .spyOn(window.HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue(ctx as unknown as CanvasRenderingContext2D)
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await waitForLive()
+      const layer = tapTarget()
+      setTapRect(layer)
+      vi.mocked(parseSamStream).mockResolvedValueOnce([
+        maskRecord({ x1: 300, y1: 200, x2: 340, y2: 240, w: 41, h: 41 }),
+      ])
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 320, clientY: 220 })
+      })
+      expect(segmentImage).toHaveBeenCalledWith('data:image/jpeg;base64,AAA', 'tapped part', {
+        x: 320,
+        y: 220,
+        width: 640,
+        height: 480,
+      })
+      expect(await screen.findByText('M6 hex bolt')).toBeInTheDocument()
+      expect(fillText).toHaveBeenCalledWith('1', expect.any(Number), expect.any(Number))
+      // The frame source is the live video, not a still canvas.
+      const frameEl = vi.mocked(captureVideoFrame).mock.calls[0][0] as HTMLElement
+      expect(frameEl.tagName).toBe('VIDEO')
+    } finally {
+      ctxSpy.mockRestore()
+      media.restore()
+    }
+  })
+
+  it('identifies a live circle drag at 1x', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await waitForLive()
+      setStageDims(320, 240)
+      const layer = tapTarget()
+      await act(async () => {
+        traceLoop(layer, 100, 100, 200, 200)
+      })
+      expect(segmentImage).toHaveBeenCalledWith(
+        'data:image/jpeg;base64,AAA',
+        'circled part',
+        undefined,
+        { x1: 200, y1: 200, x2: 400, y2: 400, width: 640, height: 480 },
+      )
+      expect(await screen.findByText('M6 hex bolt')).toBeInTheDocument()
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('suppresses the live tap after a pinch', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await waitForLive()
+      const layer = tapTarget()
+      setTapRect(layer)
+      fireEvent.pointerDown(layer, { pointerId: 1, clientX: 100, clientY: 100 })
+      fireEvent.pointerDown(layer, { pointerId: 2, clientX: 200, clientY: 100 })
+      fireEvent.pointerMove(layer, { pointerId: 2, clientX: 250, clientY: 100 })
+      fireEvent.pointerUp(layer, { pointerId: 2, clientX: 250, clientY: 100 })
+      fireEvent.pointerUp(layer, { pointerId: 1, clientX: 100, clientY: 100 })
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 100, clientY: 100 })
+      })
+      expect(segmentImage).not.toHaveBeenCalled()
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('pans a zoomed live drag without tracing or identifying', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await waitForLive()
+      setStageDims(320, 240)
+      wheelZoomIn()
+      const stage = screen.getByTestId('zoom-stage')
+      expect(stage.getAttribute('style')).toContain('scale(1.2)')
+      const layer = tapTarget()
+      fireEvent.pointerDown(layer, { pointerId: 1, clientX: 200, clientY: 200 })
+      fireEvent.pointerMove(layer, { pointerId: 1, clientX: 150, clientY: 180 })
+      fireEvent.pointerUp(layer, { pointerId: 1, clientX: 150, clientY: 180 })
+      expect(screen.queryByTestId('trace-trail')).not.toBeInTheDocument()
+      expect(segmentImage).not.toHaveBeenCalled()
+      // The drag panned the zoomed stage by (-50,-20) instead of tracing.
+      expect(stage.getAttribute('style')).toContain('translate(-50px, -20px)')
+      // The pan also consumes the release click.
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 150, clientY: 180 })
+      })
+      expect(segmentImage).not.toHaveBeenCalled()
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('ignores taps when the camera is dead', async () => {
+    mockCamera(false)
+    render(<Scanner />)
+    expect(await screen.findByText('NO FEED')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Circle or tap to identify a part')).not.toBeInTheDocument()
+    expect(screen.queryByText('Drag to circle a part · tap to identify')).not.toBeInTheDocument()
+    expect(segmentImage).not.toHaveBeenCalled()
+  })
+
+  it('removes a live outline on long-press without re-segmenting', async () => {
+    vi.useFakeTimers()
+    const media = mockMediaControls()
+    try {
+      mockCamera(true)
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await waitForLive()
+      const layer = tapTarget()
+      setTapRect(layer)
+      vi.mocked(parseSamStream).mockResolvedValueOnce([
+        maskRecord({ x1: 300, y1: 200, x2: 340, y2: 240, w: 41, h: 41 }),
+      ])
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 320, clientY: 220 })
+      })
+      expect(screen.getByText('M6 hex bolt')).toBeInTheDocument()
+      const segments = vi.mocked(segmentImage).mock.calls.length
+      await act(async () => {
+        fireEvent.pointerDown(layer, { clientX: 320, clientY: 220 })
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500)
+      })
+      await act(async () => {
+        fireEvent.pointerUp(layer, { clientX: 320, clientY: 220 })
+      })
+      // The release click is consumed by the long-press.
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 320, clientY: 220 })
+      })
+      expect(segmentImage).toHaveBeenCalledTimes(segments)
+      expect(screen.queryByText('M6 hex bolt')).not.toBeInTheDocument()
+    } finally {
+      media.restore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('shows the gesture hint pill while live', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      render(<Scanner />)
+      await waitForLive()
+      expect(screen.getByText('Drag to circle a part · tap to identify')).toBeInTheDocument()
     } finally {
       media.restore()
     }
@@ -3226,12 +3826,10 @@ describe('Scanner zoom', () => {
       render(<Scanner />)
       expect(await screen.findByText('LIVE')).toBeInTheDocument()
       wheelZoomIn()
-      openOverflow()
-      const freeze = screen.getByRole('switch', { name: 'Freeze frame' })
-      fireEvent.click(freeze)
+      pressFreezeFrame()
       expect(await screen.findByText('FROZEN')).toBeInTheDocument()
       expect(stageStyle()).toContain('scale(1.2)')
-      fireEvent.click(freeze)
+      pressFreezeFrame()
       expect(await screen.findByText('LIVE')).toBeInTheDocument()
       expect(stageStyle()).toContain('scale(1.2)')
     } finally {

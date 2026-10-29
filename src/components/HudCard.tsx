@@ -14,6 +14,35 @@ interface HudCardProps {
 
 const SHELL = 'w-full rounded-2xl bg-black/80 backdrop-blur-md p-4 flex flex-col gap-3'
 
+/** Card size mode: slim bar, docked card, or tall docked card. */
+type CardMode = 'normal' | 'minimized' | 'maximized'
+
+const ICON_BUTTON =
+  'min-h-[48px] min-w-[48px] shrink-0 rounded-lg bg-white/15 text-white active:scale-95 transition flex items-center justify-center'
+
+/** Stroke icon; the accessible name always comes from the owning button. */
+function Icon({ d }: { d: string }) {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="h-6 w-6"
+    >
+      <path d={d} />
+    </svg>
+  )
+}
+
+const CHEVRON_UP = 'M18 15l-6-6-6 6'
+const CHEVRON_DOWN = 'M6 9l6 6 6-6'
+const EXPAND_CORNERS = 'M4 9V4h5 M20 9V4h-5 M4 15v5h5 M20 15v5h-5'
+const SHRINK_CORNERS = 'M9 4v5H4 M15 4v5h5 M9 20v-5H4 M15 20v-5h5'
+
 function SkeletonCard() {
   return (
     <section aria-label="Repair guidance" className={`${SHELL} max-h-[44dvh]`}>
@@ -35,7 +64,10 @@ function SkeletonCard() {
  * content is never authoritative — specs always carry the verify treatment,
  * the warnings slot always renders, and there is intentionally no numeric
  * confidence anywhere). Content scrolls internally past 44dvh so the step
- * buttons stay pinned and reachable (M4 landscape).
+ * buttons stay pinned and reachable (M4 landscape). Tri-state sizing:
+ * minimized (slim bar), normal (44dvh docked card), maximized (80dvh docked
+ * card) — maximized stays in the dock so findings, input, and step buttons
+ * remain reachable.
  */
 export default function HudCard({
   guidance,
@@ -45,10 +77,11 @@ export default function HudCard({
   onScanAnother,
   guides,
 }: HudCardProps) {
-  const [minimized, setMinimized] = useState(false)
-  // A fresh scan always re-opens the card; step changes keep its state.
+  const [mode, setMode] = useState<CardMode>('normal')
+  // A fresh scan always re-opens the card at normal size; step changes
+  // keep its state.
   useEffect(() => {
-    setMinimized(false)
+    setMode('normal')
   }, [guidance])
 
   if (!guidance) {
@@ -60,7 +93,7 @@ export default function HudCard({
   const safeIndex = steps.length > 0 ? Math.min(Math.max(0, stepIndex), steps.length - 1) : 0
   const step = steps[safeIndex]
 
-  if (minimized) {
+  if (mode === 'minimized') {
     return (
       <section aria-label="Repair guidance" className="w-full rounded-2xl bg-black/80 backdrop-blur-md px-4 py-2">
         <div className="flex items-center gap-2">
@@ -74,20 +107,24 @@ export default function HudCard({
           )}
           <button
             type="button"
-            onClick={() => setMinimized(false)}
+            onClick={() => setMode('normal')}
             aria-expanded={false}
             aria-label="Expand steps"
-            className="min-h-[48px] shrink-0 rounded-lg bg-white/15 px-4 text-white font-bold text-base active:scale-95 transition"
+            className={ICON_BUTTON}
           >
-            Expand
+            <Icon d={CHEVRON_UP} />
           </button>
         </div>
       </section>
     )
   }
 
+  const maximized = mode === 'maximized'
   return (
-    <section aria-label="Repair guidance" className={`${SHELL} max-h-[44dvh]`}>
+    <section
+      aria-label="Repair guidance"
+      className={`${SHELL} ${maximized ? 'max-h-[80dvh]' : 'max-h-[44dvh]'}`}
+    >
       <div className="min-h-0 overflow-y-auto flex flex-col gap-3">
         <div className="flex items-start gap-2">
           <h2 className="min-w-0 flex-1 text-xl font-bold tracking-tight text-white">
@@ -95,13 +132,34 @@ export default function HudCard({
           </h2>
           <button
             type="button"
-            onClick={() => setMinimized(true)}
+            onClick={() => setMode('minimized')}
             aria-expanded={true}
             aria-label="Minimize steps"
-            className="min-h-[48px] shrink-0 rounded-lg bg-white/15 px-4 text-white font-bold text-base active:scale-95 transition"
+            className={ICON_BUTTON}
           >
-            Minimize
+            <Icon d={CHEVRON_DOWN} />
           </button>
+          {maximized ? (
+            <button
+              type="button"
+              onClick={() => setMode('normal')}
+              aria-expanded={true}
+              aria-label="Restore steps"
+              className={ICON_BUTTON}
+            >
+              <Icon d={SHRINK_CORNERS} />
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setMode('maximized')}
+              aria-expanded={true}
+              aria-label="Maximize steps"
+              className={ICON_BUTTON}
+            >
+              <Icon d={EXPAND_CORNERS} />
+            </button>
+          )}
         </div>
 
         {step ? (
@@ -226,6 +284,8 @@ export default function HudCard({
 
       <div className="flex flex-col gap-2">
         {step && (
+          // Handlers pass raw stepIndex (the owner clamps); only the
+          // disabled states use safeIndex, which is display-only here.
           <div className="flex gap-2">
             <button
               type="button"
