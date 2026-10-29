@@ -10,6 +10,9 @@ What it does:
   warnings, and manual/source links.
 - Hands-free voice loop with a typed query bar that runs the same pipeline.
 
+**Live demo:** https://soulsplit.github.io/wrenchmind/ (deployed from `main`
+via GitHub Actions; camera and mic work directly since Pages serves HTTPS).
+
 ## Quickstart (local)
 
 ```sh
