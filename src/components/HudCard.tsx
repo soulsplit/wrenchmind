@@ -48,9 +48,11 @@ function SkeletonCard() {
  * the warnings slot always renders, and there is intentionally no numeric
  * confidence anywhere). Content scrolls internally past 44dvh so the step
  * buttons stay pinned and reachable (M4 landscape). Tri-state sizing:
- * minimized (slim bar), normal (44dvh docked card), maximized (80dvh docked
+ * minimized (slim bar), normal (44dvh docked card), maximized (74dvh docked
  * card) — maximized stays in the dock so findings, input, and step buttons
- * remain reachable.
+ * remain reachable. Maximized stops at 74dvh (56dvh landscape) so a
+ * wrapped two-line badge row (e.g. a long rotating hint pill) clears the
+ * card top instead of overlapping it.
  */
 export default function HudCard({
   guidance,
@@ -107,7 +109,7 @@ export default function HudCard({
   return (
     <section
       aria-label="Repair guidance"
-      className={`${SHELL} ${maximized ? 'max-h-[80dvh] landscape:max-h-[60dvh]' : 'max-h-[44dvh]'}`}
+      className={`${SHELL} ${maximized ? 'max-h-[74dvh] landscape:max-h-[56dvh]' : 'max-h-[44dvh]'}`}
     >
       <div className="min-h-0 overflow-y-auto flex flex-col gap-3">
         <div className="flex items-start gap-2">

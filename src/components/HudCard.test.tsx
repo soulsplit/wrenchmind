@@ -400,7 +400,7 @@ describe('HudCard sizing', () => {
       minimize.compareDocumentPosition(maximize) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy()
     fireEvent.click(maximize)
-    expect(cardSection()).toHaveClass('max-h-[80dvh]')
+    expect(cardSection()).toHaveClass('max-h-[74dvh]')
     expect(screen.getByText('Remove the belt cover')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Maximize steps' })).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Restore steps' }))
@@ -437,7 +437,7 @@ describe('HudCard sizing', () => {
         onScanAnother={() => undefined}
       />,
     )
-    expect(cardSection()).toHaveClass('max-h-[80dvh]')
+    expect(cardSection()).toHaveClass('max-h-[74dvh]')
     expect(screen.getByText('Step 2 of 3')).toBeInTheDocument()
   })
 
