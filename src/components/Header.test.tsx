@@ -400,4 +400,13 @@ describe('Header', () => {
     rerender(<Header {...props} hint={null} />)
     expect(screen.queryByText('Drag to circle a part')).not.toBeInTheDocument()
   })
+
+  it('keeps a long hint pill to a single truncated line', () => {
+    renderHeader({ hint: 'Drag to circle a part · tap to identify' })
+    const text = screen.getByText('Drag to circle a part · tap to identify')
+    // Inner span ellipsizes; the pill itself never exceeds the badge row.
+    expect(text).toHaveClass('truncate')
+    expect(text.parentElement).toHaveClass('max-w-full')
+    expect(text.parentElement).toHaveAttribute('title', 'Drag to circle a part · tap to identify')
+  })
 })

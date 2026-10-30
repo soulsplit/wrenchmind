@@ -270,8 +270,11 @@ export default function Header({
         )}
         <StatusBar status={status} />
         {hint && (
-          <span className="inline-flex items-center rounded-full bg-black/70 px-2.5 py-1 text-xs font-semibold uppercase tracking-wide text-cyan-200">
-            {hint}
+          <span
+            className="inline-flex min-w-0 max-w-full items-center rounded-full bg-black/70 px-2.5 py-1 text-xs font-semibold uppercase tracking-wide text-cyan-200"
+            title={hint}
+          >
+            <span className="min-w-0 truncate">{hint}</span>
           </span>
         )}
       </div>
