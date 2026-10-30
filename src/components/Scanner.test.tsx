@@ -3872,7 +3872,7 @@ describe('Scanner freeze frame', () => {
   })
 
   it('forces torch off when freezing', async () => {
-    const { stream } = torchStream()
+    const { stream, applyConstraints } = torchStream()
     mockCameraStream(stream)
     const media = mockMediaControls()
     try {
@@ -3882,7 +3882,12 @@ describe('Scanner freeze frame', () => {
       fireEvent.click(toggle)
       await waitFor(() => expect(toggle).toHaveAttribute('aria-pressed', 'true'))
       await freezeFrame()
-      expect(screen.getByText('FROZEN')).toBeInTheDocument()
+      expect(await screen.findByText('FROZEN')).toBeInTheDocument()
+      // Hardware first: torch:false reaches the live track before the
+      // tracks stop, so the LED cannot stay on after the camera stops.
+      await waitFor(() =>
+        expect(applyConstraints).toHaveBeenCalledWith({ advanced: [{ torch: false }] }),
+      )
       expect(
         getLogs().some((e) => e.message.includes('flashlight off (freeze stopped the camera)')),
       ).toBe(true)
@@ -3893,6 +3898,32 @@ describe('Scanner freeze frame', () => {
         'aria-pressed',
         'false',
       )
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('still freezes when the torch-off constraint is rejected', async () => {
+    const { stream, applyConstraints } = torchStream()
+    mockCameraStream(stream)
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      const toggle = await screen.findByRole('button', { name: 'Flashlight' })
+      fireEvent.click(toggle)
+      await waitFor(() => expect(toggle).toHaveAttribute('aria-pressed', 'true'))
+      // Only the freeze-time torch-off attempt fails; enabling succeeded.
+      applyConstraints.mockRejectedValueOnce(new Error('torch off failed'))
+      await freezeFrame()
+      expect(await screen.findByText('FROZEN')).toBeInTheDocument()
+      await waitFor(() =>
+        expect(applyConstraints).toHaveBeenCalledWith({ advanced: [{ torch: false }] }),
+      )
+      expect(screen.queryByRole('button', { name: 'Flashlight' })).not.toBeInTheDocument()
+      expect(
+        getLogs().some((e) => e.message.includes('flashlight off (freeze stopped the camera)')),
+      ).toBe(true)
     } finally {
       media.restore()
     }

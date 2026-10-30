@@ -251,6 +251,8 @@ export default function Scanner() {
   const [facing, setFacing] = useState<'environment' | 'user'>('environment')
   const [multiCamera, setMultiCamera] = useState(true)
   const [torchOn, setTorchOn] = useState(false)
+  const torchOnRef = useRef(false)
+  torchOnRef.current = torchOn
   const [hasTorch, setHasTorch] = useState(false)
   const [cameraLive, setCameraLive] = useState(false)
   const [frozen, setFrozen] = useState(false)
@@ -336,6 +338,24 @@ export default function Scanner() {
     stream?.getTracks().forEach((t) => t.stop())
     if (video) video.srcObject = null
     setCameraLive(false)
+  }, [])
+
+  /**
+   * Switch the hardware torch off on the live track. Stopping a track with
+   * an active torch constraint can leave the LED stuck on (the camera is
+   * off but the light stays on), so callers must await this BEFORE
+   * stopTracks(). Best-effort: resolves silently with no track or when
+   * the device rejects the constraint.
+   */
+  const extinguishTorch = useCallback(async () => {
+    const track = (videoRef.current?.srcObject as MediaStream | null)?.getVideoTracks()[0]
+    if (!track?.applyConstraints) return
+    try {
+      const constraint: TorchConstraintSet = { torch: false }
+      await track.applyConstraints({ advanced: [constraint] })
+    } catch {
+      logWarn('camera', 'flashlight off failed')
+    }
   }, [])
 
   /**
@@ -560,6 +580,9 @@ export default function Scanner() {
     })()
     return () => {
       cancelled = true
+      // Same stuck-LED hazard as freezing: kill the torch on the live
+      // track first (fire-and-forget, cleanup cannot await) when it is on.
+      if (torchOnRef.current) void extinguishTorch()
       stopTracks()
       setFrozen(false)
       setActualFacing('unknown')
@@ -567,7 +590,7 @@ export default function Scanner() {
       setHasTorch(false)
       stream?.getTracks().forEach((t) => t.stop())
     }
-  }, [facing, restartKey, stopTracks])
+  }, [facing, restartKey, stopTracks, extinguishTorch])
 
   // Rotate the badge-row hint while the feed is usable so secondary
   // gestures (long-press remove, 1x circle rule, voice mode) surface
@@ -694,7 +717,7 @@ export default function Scanner() {
    * succeeds.
    */
   const setFrozenMode = useCallback(
-    (next: boolean) => {
+    async (next: boolean) => {
       if (next) {
         const video = videoRef.current
         const vw = video?.videoWidth ?? 0
@@ -708,11 +731,14 @@ export default function Scanner() {
           setStillUrl(still.toDataURL('image/jpeg', 0.92))
         }
         pauseRefresh()
-        stopTracks()
         if (torchOn) {
+          // Hardware first: stopping a track with an active torch
+          // constraint can leave the LED stuck on after the camera stops.
+          await extinguishTorch()
           setTorchOn(false)
           logInfo('camera', 'flashlight off (freeze stopped the camera)')
         }
+        stopTracks()
         setFrozen(true)
         logInfo('camera', 'frame frozen — camera stopped, circle or tap a part')
         return
@@ -732,7 +758,7 @@ export default function Scanner() {
       setRestartKey((k) => k + 1)
       logInfo('camera', 'frame live — AR annotations cleared')
     },
-    [pauseRefresh, stopTracks, clearRefresh, draw, torchOn],
+    [pauseRefresh, stopTracks, clearRefresh, draw, torchOn, extinguishTorch],
   )
 
   /**
@@ -1704,7 +1730,7 @@ export default function Scanner() {
         hasTorch={hasTorch}
         onTorchToggle={(next) => void toggleTorch(next)}
         frozen={frozen}
-        onFreezeToggle={(next) => setFrozenMode(next)}
+        onFreezeToggle={(next) => void setFrozenMode(next)}
         hint={(frozen || cameraLive) ? HINTS[hintIndex % HINTS.length] : null}
       />
       {/*
