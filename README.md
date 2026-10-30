@@ -56,9 +56,10 @@ and enable Pages with the **GitHub Actions** source in repo settings.
   fastener) with callout pills; plural queries ("all the bolts") isolate
   every instance with numbered outlines. Overlays re-segment every 2 s so
   they track moving subjects.
-- Voice mode toggle with continuous recognition; "done", "back", "repeat"
-  step through the repair card hands-free. Once locked on, follow-ups
-  answer by voice without re-marking.
+- Voice mode toggle with continuous recognition via Meta Muse Voice
+  Transcribe (realtime socket, model-detected turn ends); "done", "back",
+  "repeat" step through the repair card hands-free. Once locked on,
+  follow-ups answer by voice without re-marking.
 - Repair guidance card: step n-of-m with Back / Next Step buttons, specs
   (always flagged "verify against the manual"), tools, a warnings slot
   that always renders, manual title, source links, and matching iFixit

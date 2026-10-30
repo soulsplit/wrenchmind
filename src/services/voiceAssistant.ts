@@ -1,42 +1,32 @@
 import type { MemoryEntry } from '../types'
 import { permissionBlocker, secureContextBlocker } from './mediaSupport'
-import { logError, logInfo, logWarn } from './logger'
+import { logDebug, logError, logInfo, logWarn } from './logger'
+import {
+  CLOSE_TIMEOUT_MS,
+  HANDSHAKE_TIMEOUT_MS,
+  MAX_BUFFERED_BYTES,
+  REALTIME_URL,
+  buildHandshake,
+} from './realtimeTranscribe'
 
 export interface VoiceAssistantCallbacks {
   onPhrase: (phrase: string) => void
   onError: (message: string) => void
 }
 
-interface SpeechRecognitionResultLike {
-  isFinal: boolean
-  0: { transcript: string }
-}
+type AudioContextCtor = typeof AudioContext
+type WorkletNodeCtor = new (ctx: AudioContext, name: string) => AudioWorkletNode
 
-interface SpeechRecognitionEventLike extends Event {
-  results: ArrayLike<SpeechRecognitionResultLike> & { length: number }
-}
-
-interface SpeechRecognitionErrorEventLike extends Event {
-  error: string
-}
-
-interface SpeechRecognitionLike {
-  continuous: boolean
-  interimResults: boolean
-  lang: string
-  onresult: ((event: SpeechRecognitionEventLike) => void) | null
-  onerror: ((event: SpeechRecognitionErrorEventLike) => void) | null
-  onend: (() => void) | null
-  start: () => void
-  stop: () => void
-}
-
-type SpeechRecognitionCtor = new () => SpeechRecognitionLike
-
-function getRecognitionCtor(): SpeechRecognitionCtor | null {
+function getAudioContextCtor(): AudioContextCtor | null {
   const w = window as unknown as Record<string, unknown>
-  const ctor = w['SpeechRecognition'] ?? w['webkitSpeechRecognition']
-  if (typeof ctor === 'function') return ctor as SpeechRecognitionCtor
+  const ctor = w['AudioContext'] ?? w['webkitAudioContext']
+  if (typeof ctor === 'function') return ctor as AudioContextCtor
+  return null
+}
+
+function getWorkletNodeCtor(): WorkletNodeCtor | null {
+  const ctor = (window as unknown as Record<string, unknown>)['AudioWorkletNode']
+  if (typeof ctor === 'function') return ctor as WorkletNodeCtor
   return null
 }
 
@@ -50,15 +40,23 @@ function backoffDelay(attempt: number): number {
 }
 
 /**
- * Continuous voice recognition loop with exponential-backoff restarts,
- * a bounded restart cap, and rolling short-term memory of resolved targets.
+ * Continuous transcription loop over Meta Muse Voice Transcribe realtime:
+ * mic -> AudioWorklet (24kHz s16le) -> websocket, with exponential-backoff
+ * reconnects, a bounded restart cap, and rolling short-term memory.
  */
 export class VoiceAssistant {
-  private rec: SpeechRecognitionLike | null = null
+  private ws: WebSocket | null = null
+  private acked = false
+  private closing = false
   private listening = false
   private restartAttempts = 0
   private restartTimer: number | null = null
+  private ackTimer: number | null = null
+  private closeTimer: number | null = null
   private audioCtx: AudioContext | null = null
+  private micStream: MediaStream | null = null
+  private sourceNode: MediaStreamAudioSourceNode | null = null
+  private workletNode: AudioWorkletNode | null = null
   private memory: MemoryEntry[] = []
   private callbacks: VoiceAssistantCallbacks
   /** Bumped on every start()/stop() so stale async continuations bail out. */
@@ -94,10 +92,17 @@ export class VoiceAssistant {
   async start(): Promise<void> {
     if (this.listening) return
     const epoch = ++this.startEpoch
-    const Ctor = getRecognitionCtor()
-    if (!Ctor) {
+    const AC = getAudioContextCtor()
+    const WorkletCtor = getWorkletNodeCtor()
+    if (!AC || !WorkletCtor || typeof WebSocket !== 'function') {
       logError('voice', 'speech recognition unsupported on this device')
       this.callbacks.onError('Speech recognition not supported on this device')
+      return
+    }
+    const apiKey = import.meta.env.VITE_META_MODEL_API_KEY as string
+    if (!apiKey) {
+      logError('voice', 'missing VITE_META_MODEL_API_KEY')
+      this.callbacks.onError('API key missing: set VITE_META_MODEL_API_KEY in .env')
       return
     }
     const blocker = secureContextBlocker('Microphone')
@@ -106,10 +111,12 @@ export class VoiceAssistant {
       this.callbacks.onError(blocker)
       return
     }
-    // Request mic explicitly so denials surface with a clear message.
+    // The mic stays open for the whole session; tracks stop on stop().
+    let stream: MediaStream
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      stream.getTracks().forEach((t) => t.stop())
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true },
+      })
     } catch {
       if (epoch !== this.startEpoch) return
       const hint =
@@ -118,22 +125,49 @@ export class VoiceAssistant {
       this.callbacks.onError(hint)
       return
     }
-    if (epoch !== this.startEpoch) return
-    // Resume a suspended audio context so synthesis/capture can proceed.
-    try {
-      const AC = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
-      if (AC) {
-        this.audioCtx ??= new AC()
-        if (this.audioCtx.state === 'suspended') await this.audioCtx.resume()
-      }
-    } catch {
-      /* non-fatal: recognition can still work */
+    if (epoch !== this.startEpoch) {
+      VoiceAssistant.releaseStart(stream, null)
+      return
     }
-    if (epoch !== this.startEpoch) return
+    // Build the graph in locals; publish only on the current epoch so a
+    // stop()/start() that won the race keeps its own state intact.
+    const audioCtx = new AC()
+    try {
+      if (audioCtx.state === 'suspended') await audioCtx.resume()
+      if (epoch !== this.startEpoch) {
+        VoiceAssistant.releaseStart(stream, audioCtx)
+        return
+      }
+      // The worklet ships from public/: Vite does not bundle AudioWorklet
+      // modules referenced via `new URL`, so it never reaches dist from src.
+      await audioCtx.audioWorklet.addModule(`${import.meta.env.BASE_URL}pcmWorklet.js`)
+      if (epoch !== this.startEpoch) {
+        VoiceAssistant.releaseStart(stream, audioCtx)
+        return
+      }
+      const sourceNode = audioCtx.createMediaStreamSource(stream)
+      const workletNode = new WorkletCtor(audioCtx, 'pcm-worklet')
+      workletNode.port.onmessage = (event: MessageEvent) => this.sendAudio(event.data)
+      sourceNode.connect(workletNode)
+      if (epoch !== this.startEpoch) {
+        VoiceAssistant.releaseStart(stream, audioCtx)
+        return
+      }
+      this.audioCtx = audioCtx
+      this.micStream = stream
+      this.sourceNode = sourceNode
+      this.workletNode = workletNode
+    } catch {
+      VoiceAssistant.releaseStart(stream, audioCtx)
+      if (epoch !== this.startEpoch) return
+      logError('voice', 'audio capture graph failed to start')
+      this.callbacks.onError('Speech recognition not supported on this device')
+      return
+    }
 
     this.listening = true
     this.restartAttempts = 0
-    this.startRecognition(Ctor)
+    this.connect()
     logInfo('voice', 'listening started')
   }
 
@@ -142,60 +176,147 @@ export class VoiceAssistant {
     if (this.listening) logInfo('voice', 'listening stopped')
     this.listening = false
     this.clearRestartTimer()
+    this.clearAckTimer()
     this.restartAttempts = 0
-    try {
-      this.rec?.stop()
-    } catch {
-      /* already stopped */
+    const ws = this.ws
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      // Graceful end: signal end-of-stream and keep reading to server close.
+      this.closing = true
+      try {
+        ws.send(JSON.stringify({ type: 'endStream' }))
+      } catch {
+        this.teardownSocket()
+      }
+      if (this.ws === ws) {
+        this.clearCloseTimer()
+        this.closeTimer = window.setTimeout(() => {
+          this.closeTimer = null
+          if (this.ws === ws) {
+            logWarn('voice', 'server close timed out; forcing close')
+            this.teardownSocket()
+          }
+        }, CLOSE_TIMEOUT_MS)
+      }
+    } else {
+      this.teardownSocket()
     }
-    this.rec = null
-    if (this.audioCtx) {
-      void this.audioCtx.close().catch(() => undefined)
-      this.audioCtx = null
+    this.teardownMedia()
+  }
+
+  private connect(): void {
+    if (!this.listening) return
+    this.teardownSocket()
+    this.acked = false
+    this.closing = false
+    const apiKey = import.meta.env.VITE_META_MODEL_API_KEY as string
+    const ws = new WebSocket(REALTIME_URL)
+    ws.binaryType = 'arraybuffer'
+    this.ws = ws
+    ws.onopen = () => {
+      if (ws !== this.ws) return
+      try {
+        ws.send(JSON.stringify(buildHandshake(apiKey)))
+      } catch {
+        this.reconnect()
+        return
+      }
+      this.clearAckTimer()
+      this.ackTimer = window.setTimeout(() => {
+        this.ackTimer = null
+        if (ws !== this.ws || this.acked || !this.listening || this.closing) return
+        logWarn('voice', 'transcribe ack timed out; reconnecting')
+        this.reconnect()
+      }, HANDSHAKE_TIMEOUT_MS)
+    }
+    ws.onmessage = (event: MessageEvent) => {
+      if (ws !== this.ws) return
+      this.handleMessage(event.data)
+    }
+    ws.onerror = () => {
+      if (ws !== this.ws) return
+      // onclose follows and drives the restart; avoid double-scheduling.
+      logWarn('voice', 'transcribe socket error')
+    }
+    ws.onclose = (event: CloseEvent) => {
+      if (ws !== this.ws) return
+      this.ws = null
+      this.clearAckTimer()
+      if (this.closing || !this.listening) {
+        this.finishClose(event.code)
+        return
+      }
+      // Covers abnormal drops and the 60-min server session rotation.
+      logWarn('voice', `transcribe session closed (${event.code}); reconnecting`)
+      this.scheduleRestart()
     }
   }
 
-  private startRecognition(Ctor: SpeechRecognitionCtor): void {
-    if (!this.listening) return
-    const rec = new Ctor()
-    rec.continuous = true
-    rec.interimResults = false
-    rec.lang = 'en-US'
-    rec.onresult = (event) => {
-      const last = event.results[event.results.length - 1]
-      if (last?.isFinal) {
+  private handleMessage(data: unknown): void {
+    if (typeof data !== 'string') return
+    let msg: Record<string, unknown>
+    try {
+      msg = JSON.parse(data) as Record<string, unknown>
+    } catch {
+      logWarn('voice', 'ignoring malformed transcribe frame')
+      return
+    }
+    // The typeless {sessionId} ack gates all audio.
+    if (typeof msg['sessionId'] === 'string' && msg['type'] === undefined) {
+      this.acked = true
+      this.clearAckTimer()
+      logInfo('voice', 'transcribe session acknowledged')
+      return
+    }
+    switch (msg['type']) {
+      case 'speechComplete': {
         // Successful result resets the backoff ladder and cancels a pending restart.
         this.restartAttempts = 0
         this.clearRestartTimer()
-        const phrase = last[0].transcript.trim()
-        if (phrase) this.callbacks.onPhrase(phrase)
+        const transcript = typeof msg['transcript'] === 'string' ? msg['transcript'].trim() : ''
+        if (transcript) this.callbacks.onPhrase(transcript)
+        break
       }
-    }
-    rec.onerror = (event) => {
-      if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
-        logError('voice', `recognition error: ${event.error}`)
-        this.callbacks.onError('Microphone access denied')
-        this.stop()
-        return
+      case 'transcript':
+        // Interim partials; endpointed text arrives as speechComplete.
+        break
+      case 'speechStart':
+      case 'speechEnd':
+        logDebug('voice', String(msg['type']))
+        break
+      case 'error': {
+        const detail = typeof msg['message'] === 'string' ? msg['message'] : 'unknown error'
+        logWarn('voice', `transcribe error: ${detail}`)
+        if (!this.closing && this.listening) this.reconnect()
+        break
       }
-      logWarn('voice', `recognition error: ${event.error}`)
-      this.scheduleRestart()
+      default:
+        logDebug('voice', `ignoring unknown frame: ${String(msg['type'])}`)
+        break
     }
-    rec.onend = () => {
-      // onend fires after stop() too; only auto-restart while listening.
-      if (this.listening) this.scheduleRestart()
-    }
-    this.rec = rec
+  }
+
+  private sendAudio(chunk: unknown): void {
+    if (!this.listening || this.closing || !this.acked) return
+    const ws = this.ws
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    if (!(chunk instanceof ArrayBuffer) || chunk.byteLength === 0) return
+    // Blocks arrive in real time; drop (never queue) past ~5s buffered.
+    if (ws.bufferedAmount + chunk.byteLength > MAX_BUFFERED_BYTES) return
     try {
-      rec.start()
+      ws.send(chunk)
     } catch {
-      this.scheduleRestart()
+      /* transient; the next block retries */
     }
+  }
+
+  private reconnect(): void {
+    this.teardownSocket()
+    this.scheduleRestart()
   }
 
   private scheduleRestart(): void {
     if (!this.listening) return
-    // onerror and onend often fire for one failure; schedule only once.
+    // Error frame and close often fire for one failure; schedule only once.
     if (this.restartTimer !== null) return
     if (this.restartAttempts >= MAX_RESTARTS) {
       logError('voice', 'restart cap reached; stopping')
@@ -209,20 +330,88 @@ export class VoiceAssistant {
     this.restartTimer = window.setTimeout(() => {
       this.restartTimer = null
       if (!this.listening) return
-      const Ctor = getRecognitionCtor()
-      if (!Ctor) {
-        this.callbacks.onError('Speech recognition not supported on this device')
-        this.stop()
-        return
-      }
-      this.startRecognition(Ctor)
+      this.connect()
     }, delay)
+  }
+
+  private finishClose(code: number): void {
+    this.clearCloseTimer()
+    this.closing = false
+    this.acked = false
+    logInfo('voice', `transcribe session closed (${code})`)
+  }
+
+  private teardownSocket(): void {
+    this.clearAckTimer()
+    this.clearCloseTimer()
+    const ws = this.ws
+    this.ws = null
+    this.acked = false
+    this.closing = false
+    if (ws) {
+      ws.onopen = null
+      ws.onmessage = null
+      ws.onerror = null
+      ws.onclose = null
+      try {
+        ws.close()
+      } catch {
+        /* already closed */
+      }
+    }
+  }
+
+  private teardownMedia(): void {
+    const node = this.workletNode
+    this.workletNode = null
+    if (node) {
+      node.port.onmessage = null
+      try {
+        node.disconnect()
+      } catch {
+        /* already torn down */
+      }
+    }
+    const source = this.sourceNode
+    this.sourceNode = null
+    if (source) {
+      try {
+        source.disconnect()
+      } catch {
+        /* already torn down */
+      }
+    }
+    const stream = this.micStream
+    this.micStream = null
+    if (stream) stream.getTracks().forEach((t) => t.stop())
+    const ctx = this.audioCtx
+    this.audioCtx = null
+    if (ctx) void ctx.close().catch(() => undefined)
+  }
+
+  private static releaseStart(stream: MediaStream, ctx: AudioContext | null): void {
+    stream.getTracks().forEach((t) => t.stop())
+    if (ctx) void ctx.close().catch(() => undefined)
   }
 
   private clearRestartTimer(): void {
     if (this.restartTimer !== null) {
       window.clearTimeout(this.restartTimer)
       this.restartTimer = null
+    }
+  }
+
+  private clearAckTimer(): void {
+    if (this.ackTimer !== null) {
+      window.clearTimeout(this.ackTimer)
+      this.ackTimer = null
+    }
+  }
+
+  private clearCloseTimer(): void {
+    if (this.closeTimer !== null) {
+      window.clearTimeout(this.closeTimer)
+      this.closeTimer = null
     }
   }
 }

@@ -1,5 +1,5 @@
 import type { GuidanceResult, GuidanceSource, GuidanceSpec, GuidanceStep } from '../types'
-import { logError, logWarn } from './logger'
+import { logDebug, logError, logWarn } from './logger'
 import { cleanString, errorDetail, fetchWithTimeout, isRecord } from './http'
 
 const BASE = 'https://api.meta.ai/v1'
@@ -237,6 +237,22 @@ function validateGuidance(
 }
 
 /**
+ * Session cache of validated guidance. Keyed by label+phrase: the label
+ * alone is unsafe ('torque for belt' vs 'replace belt' need different
+ * answers). Failures are never cached.
+ */
+const guidanceCache = new Map<string, GuidanceResult>()
+
+function cacheKey(label: string, phrase: string): string {
+  return `${label.trim().toLowerCase()}\n${phrase.trim().toLowerCase()}`
+}
+
+/** Clear the session guidance cache (tests). */
+export function clearGuidanceCache(): void {
+  guidanceCache.clear()
+}
+
+/**
  * Fetch manual-grounded repair guidance (D1/D2/D10). Text-only Responses
  * call: the model web-searches for the best-fit repair/user manual, reads
  * and parses it, then returns strict JSON validated against the
@@ -247,6 +263,12 @@ export async function fetchGuidance(
   phrase: string,
   context: string,
 ): Promise<GuidanceResult> {
+  const cacheId = cacheKey(label, phrase)
+  const cached = guidanceCache.get(cacheId)
+  if (cached) {
+    logDebug('guidance', `cache hit for "${label.trim()}"`)
+    return cached
+  }
   const res = await fetchWithTimeout(
     `${BASE}/responses`,
     {
@@ -285,5 +307,7 @@ export async function fetchGuidance(
   }
   const items = responseItems(data)
   const payload = parseJsonText(extractFinalJsonText(items))
-  return validateGuidance(payload, label, items)
+  const result = validateGuidance(payload, label, items)
+  guidanceCache.set(cacheId, result)
+  return result
 }

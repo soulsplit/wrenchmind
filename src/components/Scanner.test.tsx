@@ -2325,6 +2325,77 @@ describe('Scanner', () => {
     ).toBe(true)
   })
 
+  it('fires guidance and guides before segmentation so lookups overlap it', async () => {
+    // Intended behavior change: guidance needs only the reason label, so it
+    // fires right after reasonSpatial instead of after SAM.
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Screw',
+      approx_x: 10,
+      approx_y: 10,
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    vi.mocked(fetchGuidance).mockResolvedValue(validGuidanceFixture)
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show screws')
+    })
+    expect(await screen.findByText('Screw')).toBeInTheDocument()
+    const guidanceOrder = vi.mocked(fetchGuidance).mock.invocationCallOrder[0]
+    const guidesOrder = vi.mocked(searchGuides).mock.invocationCallOrder[0]
+    const segmentOrder = vi.mocked(segmentImage).mock.invocationCallOrder[0]
+    expect(guidanceOrder).toBeLessThan(segmentOrder)
+    expect(guidesOrder).toBeLessThan(segmentOrder)
+  })
+
+  it('logs the manual search at fire time plus per-stage timings', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Screw',
+      approx_x: 10,
+      approx_y: 10,
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    vi.mocked(fetchGuidance).mockResolvedValue(validGuidanceFixture)
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show screws')
+    })
+    expect(await screen.findByText('Remove the belt cover')).toBeInTheDocument()
+    expect(
+      getLogs().some((e) => e.tag === 'guidance' && e.message.includes('searching manual for')),
+    ).toBe(true)
+    expect(getLogs().some((e) => e.tag === 'reason' && /\d+ms/.test(e.message))).toBe(true)
+    expect(getLogs().some((e) => e.tag === 'segment' && /\d+ms/.test(e.message))).toBe(true)
+    expect(
+      getLogs().some((e) => e.tag === 'guidance' && /\d+ steps\) in \d+ms/.test(e.message)),
+    ).toBe(true)
+  })
+
+  it('keeps gathered steps when segmentation fails after the early fire', async () => {
+    // Intended behavior change: steps for a named part stay valid even when
+    // segmentation then fails, so the error path clears nothing.
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Screw',
+      approx_x: 10,
+      approx_y: 10,
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    vi.mocked(parseSamStream).mockRejectedValueOnce(new Error('SAM down'))
+    vi.mocked(fetchGuidance).mockResolvedValue(validGuidanceFixture)
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show screws')
+    })
+    expect(fetchGuidance).toHaveBeenCalledTimes(1)
+    expect(await screen.findByText('Remove the belt cover')).toBeInTheDocument()
+    expect(screen.getByText('Step 1 of 3')).toBeInTheDocument()
+  })
+
   it('clears guidance and overlays on Scan Another Part', async () => {
     mockCamera(true)
     vi.mocked(reasonSpatial).mockResolvedValue({
@@ -4015,6 +4086,30 @@ describe('Scanner live gestures', () => {
       expect(frameEl.tagName).toBe('VIDEO')
     } finally {
       ctxSpy.mockRestore()
+      media.restore()
+    }
+  })
+
+  it('treats a small live drift as a tap instead of swallowing it', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await waitForLive()
+      setStageDims(320, 240)
+      const layer = tapTarget()
+      setTapRect(layer)
+      // 15px drift: past the 10px press slop, short of a 24px circle span.
+      // A finger tap that slides a little must still identify, not die.
+      fireEvent.pointerDown(layer, { pointerId: 1, clientX: 100, clientY: 100 })
+      fireEvent.pointerMove(layer, { pointerId: 1, clientX: 115, clientY: 100 })
+      fireEvent.pointerUp(layer, { pointerId: 1, clientX: 115, clientY: 100 })
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 115, clientY: 100 })
+      })
+      expect(segmentImage).toHaveBeenCalledTimes(1)
+    } finally {
       media.restore()
     }
   })

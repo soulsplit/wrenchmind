@@ -222,7 +222,7 @@ export default function Scanner() {
   const pendingRef = useRef<string | null>(null)
   const pressRef = useRef<{ x: number; y: number; timer: number } | null>(null)
   const suppressTapRef = useRef(false)
-  const pointersRef = useRef(new Map<number, { x: number; y: number; sx: number; sy: number }>())
+  const pointersRef = useRef(new Map<number, { x: number; y: number; sx: number; sy: number; t0: number }>())
   const pinchRef = useRef<{ dist: number; midX: number; midY: number } | null>(null)
   /**
    * Circle-trace stroke in untransformed stage coords; null when idle. The
@@ -726,6 +726,8 @@ export default function Scanner() {
     guidanceReqRef.current += 1
     const reqId = guidanceReqRef.current
     setGuidancePending(true)
+    logInfo('guidance', `searching manual for "${label}"`)
+    const started = performance.now()
     void fetchGuidance(label, phrase, context).then(
       (result) => {
         if (guidanceReqRef.current !== reqId) return
@@ -733,7 +735,10 @@ export default function Scanner() {
         setGuidance(result)
         setStepIndex(0)
         setStepPhotos({})
-        logInfo('guidance', `"${result.title}" (${result.steps.length} steps)`)
+        logInfo(
+          'guidance',
+          `"${result.title}" (${result.steps.length} steps) in ${Math.round(performance.now() - started)}ms`,
+        )
       },
       (e: unknown) => {
         if (guidanceReqRef.current !== reqId) return
@@ -869,17 +874,23 @@ export default function Scanner() {
         // inferred job context both calls share. No explicit scoping field —
         // the tool stays generic across every kind of repair.
         const ctxStr = assistant?.getContextString() ?? ''
+        const reasonStart = performance.now()
         const result = await reasonSpatial(frames, phrase, ctxStr)
+        const reasonMs = Math.round(performance.now() - reasonStart)
         if (!result.target_label) {
-          logWarn('reason', 'no target in response')
+          logWarn('reason', `no target in response in ${reasonMs}ms`)
           if (!trackingRef.current) setEmptyTarget(true)
         } else {
           logInfo(
             'reason',
-            `"${result.target_label}" @ (${result.approx_x},${result.approx_y}) [${result.display_mode}]`,
+            `"${result.target_label}" @ (${result.approx_x},${result.approx_y}) [${result.display_mode}] in ${reasonMs}ms`,
           )
         }
         if (result.target_label && !trackingRef.current) {
+          // Fire first: guidance needs only the label, so the manual and
+          // guide lookups overlap the SAM call instead of waiting for it.
+          requestGuidance(result.target_label, phrase, ctxStr)
+          requestGuides(result.target_label, phrase)
           const kind = classifyTarget(result.target_label)
           // Plural commands ("all bolts") isolate every instance in one SAM
           // call; singular targets keep the existing single-point path.
@@ -893,18 +904,20 @@ export default function Scanner() {
             .filter((p): p is SamPointPrompt => p !== undefined)
             .map((p) => toCapturePoint(p, cap))
           const prompt = pixelPts.length > 1 ? pixelPts : pixelPts[0]
+          const segmentStart = performance.now()
           const recs = (
             await parseSamStream(segmentImage(img, result.target_label, prompt))
           ).map((rec) =>
             scaleRecordToVideo(rec, cap.width, cap.height, vw, vh),
           )
+          const segmentMs = Math.round(performance.now() - segmentStart)
           const spans = recs
             .slice(0, 3)
             .map((r) => `${r.box.x2 - r.box.x1 + 1}x${r.box.y2 - r.box.y1 + 1}`)
             .join(',')
           logDebug(
             'segment',
-            `${recs.length} masks [${spans}] in ${vw}x${vh}`,
+            `${recs.length} masks [${spans}] in ${vw}x${vh} (${segmentMs}ms)`,
           )
           const plural = targetPts.length > 1 && recs.length > 1
           if (plural) logInfo('segment', `isolated ${recs.length} × "${result.target_label}"`)
@@ -928,8 +941,8 @@ export default function Scanner() {
           })
           draw()
           armRefresh(result.target_label, targetPts)
-          requestGuidance(result.target_label, phrase, ctxStr)
-          requestGuides(result.target_label, phrase)
+          // Guidance was fired before SAM above: steps stay valid even when
+          // segmentation throws, so the error path clears nothing.
           trackingRef.current = true
           setTracking(true)
         } else if (trackingRef.current) {
@@ -1379,6 +1392,7 @@ export default function Scanner() {
             y: e.clientY,
             sx: e.clientX,
             sy: e.clientY,
+            t0: Date.now(),
           })
           if (pointersRef.current.size === 2) {
             const [a, b] = [...pointersRef.current.values()]
@@ -1453,6 +1467,7 @@ export default function Scanner() {
           }
         }}
         onPointerUp={(e) => {
+          const ended = pointersRef.current.get(e.pointerId)
           pointersRef.current.delete(e.pointerId)
           if (pointersRef.current.size < 2) {
             // A pinch never becomes a tap, even a perfectly still one.
@@ -1478,9 +1493,14 @@ export default function Scanner() {
               cancelPress()
               void handleCircle(ax, ay, bx, by)
             } else if (span > LONG_PRESS_SLOP_PX) {
-              // A drag too small to circle: no query, and no tap either.
-              suppressTapRef.current = true
-              cancelPress()
+              // Below a circle span: quick drifts fall through to a normal
+              // tap (finger taps routinely slide a little), but a press
+              // held past the long-press delay was a slipped removal, not
+              // a tap — swallow it so no stray outline appears.
+              if (ended !== undefined && Date.now() - ended.t0 >= LONG_PRESS_MS) {
+                suppressTapRef.current = true
+                cancelPress()
+              }
             }
           }
         }}

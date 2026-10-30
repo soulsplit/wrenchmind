@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { fetchGuidance, GENERIC_VERIFY_WARNING } from './guidanceApi'
+import { clearGuidanceCache, fetchGuidance, GENERIC_VERIFY_WARNING } from './guidanceApi'
 import { invalidGuidanceFixture, validGuidanceFixture } from '../test/guidanceFixtures'
 import { clearLogs, getLogs } from './logger'
 
@@ -80,6 +80,9 @@ afterEach(() => {
   vi.unstubAllEnvs()
   fetchMock.mockReset()
   clearLogs()
+  // The session cache is module-level: reset between tests so stubbed
+  // fixtures never leak across cases sharing a label+phrase.
+  clearGuidanceCache()
 })
 
 describe('fetchGuidance request shape', () => {
@@ -374,5 +377,52 @@ describe('fetchGuidance failures', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('fetchGuidance session cache', () => {
+  function stubValid(): void {
+    vi.stubEnv('VITE_META_MODEL_API_KEY', 'k')
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValue(
+      jsonResponse(
+        guidanceEnvelope(modelJson(validGuidanceFixture), {
+          citations: validGuidanceFixture.sources,
+        }),
+      ),
+    )
+  }
+
+  it('serves a repeat label+phrase from cache without refetching', async () => {
+    stubValid()
+    const first = await fetchGuidance('Belt', 'replace the belt', '')
+    // Normalization is case- and whitespace-insensitive; context is not keyed.
+    const second = await fetchGuidance('  BELT  ', '  Replace The Belt ', 'other context')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(second).toEqual(first)
+    expect(getLogs().some((e) => e.tag === 'guidance' && /cache hit/.test(e.message))).toBe(true)
+  })
+
+  it('keeps different phrases for the same part as separate entries', async () => {
+    stubValid()
+    await fetchGuidance('belt', 'torque for belt', '')
+    await fetchGuidance('belt', 'replace belt', '')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('never caches failures', async () => {
+    vi.stubEnv('VITE_META_MODEL_API_KEY', 'k')
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValueOnce(errorResponse(500, 'boom'))
+    await expect(fetchGuidance('belt', 'replace belt', '')).rejects.toThrow()
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(
+        guidanceEnvelope(modelJson(validGuidanceFixture), {
+          citations: validGuidanceFixture.sources,
+        }),
+      ),
+    )
+    await fetchGuidance('belt', 'replace belt', '')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 })
