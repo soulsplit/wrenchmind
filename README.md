@@ -86,3 +86,13 @@ tunnel above or the Pages deploy — never plain-HTTP LAN. If a permission
 was previously blocked for the site, the browser will not prompt again;
 re-enable it in the browser's site settings. Where speech recognition is
 unavailable, the text query bar is the fallback.
+
+## API key exposure
+
+`VITE_META_MODEL_API_KEY` is a `VITE_`-prefixed variable, so Vite embeds it
+in the client bundle — every user receives the key. This is inherent to the
+current client-only architecture (no server proxy). Mitigate by restricting
+the key at the provider (referrer/origin allowlist, quota, rotation) and by
+treating a leaked key as rotatable, not secret. `.env` (real key) and `dist/`
+(built bundle containing the key) stay gitignored and must never be
+committed.

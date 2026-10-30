@@ -34,7 +34,7 @@ export default function QueryBar({ onSubmit }: QueryBarProps) {
       />
       <button
         type="submit"
-        className="min-h-[48px] min-w-[48px] shrink-0 px-4 py-2 rounded-lg bg-white/90 text-black font-bold shadow text-base active:scale-95 transition"
+        className="min-h-[48px] min-w-[48px] shrink-0 px-4 py-2 rounded-lg bg-white/90 text-black font-bold shadow text-base active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 focus-visible:ring-offset-2"
       >
         Send
       </button>

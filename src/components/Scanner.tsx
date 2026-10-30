@@ -167,6 +167,9 @@ const HINTS = [
 /** Coach-mark rotation cadence while the feed is usable. */
 const HINT_ROTATE_MS = 8000
 
+/** localStorage gate for the one-time voice-mode coach mark. */
+const VOICE_COACH_KEY = 'wrenchmind.voiceCoachSeen'
+
 /** Largest mask by box area; null when SAM returns none. */
 function largestMask(recs: MaskRecord[]): MaskRecord | null {
   if (recs.length === 0) return null
@@ -219,7 +222,8 @@ export default function Scanner() {
   const voiceOnRef = useRef(false)
   voiceOnRef.current = voiceOn
   const busyRef = useRef(false)
-  const pendingRef = useRef<string | null>(null)
+  /** FIFO of phrases spoken while analysis is in flight; drained in order. */
+  const pendingRef = useRef<string[]>([])
   const pressRef = useRef<{ x: number; y: number; timer: number } | null>(null)
   const suppressTapRef = useRef(false)
   const pointersRef = useRef(new Map<number, { x: number; y: number; sx: number; sy: number; t0: number }>())
@@ -258,6 +262,27 @@ export default function Scanner() {
   /** Bumped on unfreeze to re-acquire the camera via the camera effect. */
   const [restartKey, setRestartKey] = useState(0)
   const [hintIndex, setHintIndex] = useState(0)
+  /**
+   * One-time voice-mode coach mark. The rotating badge hint also teaches
+   * voice discovery, but it scrolls past; this non-rotating pill shows
+   * until dismissed once (persisted in localStorage) so first-run users
+   * actually see it. Hidden while voice mode is already on.
+   */
+  const [voiceCoachSeen, setVoiceCoachSeen] = useState(() => {
+    try {
+      return window.localStorage.getItem(VOICE_COACH_KEY) === '1'
+    } catch {
+      return false
+    }
+  })
+  const dismissVoiceCoach = () => {
+    try {
+      window.localStorage.setItem(VOICE_COACH_KEY, '1')
+    } catch {
+      /* private mode etc. — the pill simply returns next visit */
+    }
+    setVoiceCoachSeen(true)
+  }
   const [zoom, setZoom] = useState<ZoomState>(NO_ZOOM)
   const zoomRef = useRef(zoom)
   zoomRef.current = zoom
@@ -284,6 +309,8 @@ export default function Scanner() {
   /** iFixit hits for the current part; undefined while loading. */
   const [guides, setGuides] = useState<FixitGuide[]>()
   const guidesReqRef = useRef(0)
+  /** False after unmount: guards fire-and-forget fetches against setState. */
+  const mountedRef = useRef(true)
   // Desktop layout branch (lg+): the feed narrows to 2/3 and the sidebar
   // hosts the guidance card; the bottom-docked card unmounts to avoid
   // duplicating it.
@@ -391,18 +418,20 @@ export default function Scanner() {
         ctx.font = 'bold 24px system-ui, sans-serif'
         const badgeY = Math.max(28, box.y1 - 4)
         const badgeW = ctx.measureText(label).width + 16
+        // Clamp the badge origin so badgeX + badgeW never exceeds the canvas.
+        const badgeX = Math.min(Math.max(0, box.x1), Math.max(0, canvas.width - badgeW))
         if (mirroredRef.current) {
           // Counter-flip: mirror the badge around its own center so the
           // pill lands on the same pixels while the glyphs pre-mirror —
           // the CSS flip then restores readable text on screen. Display
           // only: exports capture the raw video/still, never this canvas.
-          ctx.translate(2 * (box.x1 + badgeW / 2), 0)
+          ctx.translate(2 * (badgeX + badgeW / 2), 0)
           ctx.scale(-1, 1)
         }
         ctx.fillStyle = 'rgba(0, 0, 0, 0.75)'
-        ctx.fillRect(box.x1, badgeY - 28, badgeW, 28)
+        ctx.fillRect(badgeX, badgeY - 28, badgeW, 28)
         ctx.fillStyle = STROKE[kind]
-        ctx.fillText(label, box.x1 + 8, badgeY - 7)
+        ctx.fillText(label, badgeX + 8, badgeY - 7)
         ctx.restore()
       }
     }
@@ -508,19 +537,24 @@ export default function Scanner() {
       } catch {
         /* enumeration unavailable — keep the switcher visible */
       }
+      if (cancelled) {
+        stream?.getTracks().forEach((t) => t.stop())
+        return
+      }
       if (videoRef.current) {
         videoRef.current.srcObject = stream
         try {
           await videoRef.current.play()
-          if (!cancelled) {
-            setCameraLive(true)
-            // Re-acquire succeeded: drop the still only now so the frame
-            // never flashes black during restart.
-            stillRef.current = null
-            setStillUrl(null)
-          }
+          // Re-check after the await: unmount/facing-change during play
+          // must not touch the torn-down element.
+          if (cancelled) return
+          setCameraLive(true)
+          // Re-acquire succeeded: drop the still only now so the frame
+          // never flashes black during restart.
+          stillRef.current = null
+          setStillUrl(null)
         } catch {
-          logWarn('camera', 'video autoplay was blocked')
+          if (!cancelled) logWarn('camera', 'video autoplay was blocked')
         }
       }
     })()
@@ -575,6 +609,12 @@ export default function Scanner() {
 
   // clearRefresh returned as the cleanup: disarms the refresh loop on unmount.
   useEffect(() => clearRefresh, [clearRefresh])
+
+  // Flip the mounted flag so fire-and-forget guidance/guide fetches skip
+  // setState after unmount (React 18 ignores it, but refs stay reachable).
+  useEffect(() => () => {
+    mountedRef.current = false
+  }, [])
 
   // Silence any in-flight speech on unmount so audio never outlives the view.
   useEffect(() => () => cancelSpeech(), [])
@@ -730,7 +770,7 @@ export default function Scanner() {
     const started = performance.now()
     void fetchGuidance(label, phrase, context).then(
       (result) => {
-        if (guidanceReqRef.current !== reqId) return
+        if (!mountedRef.current || guidanceReqRef.current !== reqId) return
         snapshotGuidance()
         setGuidance(result)
         setStepIndex(0)
@@ -741,11 +781,12 @@ export default function Scanner() {
         )
       },
       (e: unknown) => {
-        if (guidanceReqRef.current !== reqId) return
+        if (!mountedRef.current || guidanceReqRef.current !== reqId) return
         logWarn('guidance', `guidance unavailable: ${e instanceof Error ? e.message : String(e)}`)
       },
     ).finally(() => {
-      if (guidanceReqRef.current === reqId) setGuidancePending(false)
+      if (!mountedRef.current || guidanceReqRef.current !== reqId) return
+      setGuidancePending(false)
     })
   }, [snapshotGuidance])
 
@@ -761,12 +802,12 @@ export default function Scanner() {
     const query = buildQuery(phrase, label)
     void searchGuides(query, 3).then(
       (result) => {
-        if (guidesReqRef.current !== reqId) return
+        if (!mountedRef.current || guidesReqRef.current !== reqId) return
         setGuides(result)
         logInfo('ifixit', `"${query}" (${result.length} guides)`)
       },
       (e: unknown) => {
-        if (guidesReqRef.current !== reqId) return
+        if (!mountedRef.current || guidesReqRef.current !== reqId) return
         setGuides([])
         logWarn('ifixit', `guides unavailable: ${e instanceof Error ? e.message : String(e)}`)
       },
@@ -794,9 +835,9 @@ export default function Scanner() {
   // Identity must stay stable (all deps []-stable): the voice effect
   // resubscribes on change, which would recreate the recognizer mid-listen.
   const handlePhrase = useCallback(async (phrase: string) => {
-    // Serialize analyses; the latest phrase spoken mid-flight runs next.
+    // Serialize analyses; phrases spoken mid-flight queue FIFO and drain in order.
     if (busyRef.current) {
-      pendingRef.current = phrase
+      pendingRef.current.push(phrase)
       return
     }
     busyRef.current = true
@@ -961,9 +1002,8 @@ export default function Scanner() {
       }
     } finally {
       busyRef.current = false
-      const next = pendingRef.current
-      pendingRef.current = null
-      if (next) void handlePhrase(next)
+      const next = pendingRef.current.shift()
+      if (next !== undefined) void handlePhrase(next)
     }
   }, [draw, armRefresh, frameTarget, pinStepPhoto, requestGuidance, requestGuides, speakReply])
 
@@ -1252,7 +1292,7 @@ export default function Scanner() {
   }
 
   // Full scene reset. Zoom intentionally persists (view preference, not
-  // scene data); a queued pendingRef phrase and an in-flight trace also
+  // scene data); queued pendingRef phrases and an in-flight trace also
   // survive — both resolve against the cleared state harmlessly.
   const resetOverlays = () => {
     overlaysRef.current = []
@@ -1562,7 +1602,16 @@ export default function Scanner() {
       {(frozen || cameraLive) && (
         <div
           ref={tapRef}
+          role="button"
+          tabIndex={0}
           aria-label="Circle or tap to identify a part"
+          onKeyDown={(e) => {
+            if (e.key !== 'Enter' && e.key !== ' ') return
+            e.preventDefault()
+            const rect = tapRef.current?.getBoundingClientRect()
+            if (!rect) return
+            void handleTap(rect.left + rect.width / 2, rect.top + rect.height / 2)
+          }}
           onClick={(e) => {
             if (suppressTapRef.current) {
               suppressTapRef.current = false
@@ -1608,24 +1657,38 @@ export default function Scanner() {
           />
         </svg>
       )}
+      </div>
+      {/*
+        Callout pill lives outside the zoom stage so pinch zoom never scales
+        its text: stage coords still map 1:1 (both fill the feed pane), while
+        the padded wrapper keeps the pill inside the safe area. Width caps in
+        pane units so the pill ellipsizes instead of clipping.
+      */}
       {callout && (
         <div
-          role="status"
-          aria-label={`Located: ${callout.label}`}
-          className="absolute bg-black/80 backdrop-blur-md border border-white/20 text-white px-3 py-1.5 rounded-full text-sm font-semibold whitespace-nowrap overflow-hidden text-ellipsis max-w-[calc(100vw-1rem)] shadow-lg pointer-events-none"
-          style={calloutStyle(callout.x, callout.y)}
+          className="absolute inset-0 z-[6] pointer-events-none"
+          style={{
+            paddingLeft: 'env(safe-area-inset-left)',
+            paddingRight: 'env(safe-area-inset-right)',
+          }}
         >
-          <span
-            className="inline-block w-2.5 h-2.5 rounded-full mr-2 align-middle"
-            style={{
-              backgroundColor: STROKE[callout.kind],
-              boxShadow: `0 0 6px ${STROKE[callout.kind]}`,
-            }}
-          />
-          {callout.label}
+          <div
+            role="status"
+            aria-label={`Located: ${callout.label}`}
+            className="absolute bg-black/80 backdrop-blur-md border border-white/20 text-white px-3 py-1.5 rounded-full text-sm font-semibold whitespace-nowrap overflow-hidden text-ellipsis max-w-[calc(100%-2rem)] shadow-lg pointer-events-none"
+            style={calloutStyle(callout.x, callout.y)}
+          >
+            <span
+              className="inline-block w-2.5 h-2.5 rounded-full mr-2 align-middle"
+              style={{
+                backgroundColor: STROKE[callout.kind],
+                boxShadow: `0 0 6px ${STROKE[callout.kind]}`,
+              }}
+            />
+            {callout.label}
+          </div>
         </div>
       )}
-      </div>
       <Header
         status={status}
         live={cameraLive}
@@ -1650,7 +1713,7 @@ export default function Scanner() {
       */}
       <div
         data-testid="bottom-dock"
-        className="absolute bottom-0 inset-x-0 z-10 flex flex-col gap-2 transition-transform"
+        className="absolute bottom-0 inset-x-0 z-10 flex flex-col gap-2 max-h-[90dvh] overflow-y-auto transition-transform"
         style={{
           paddingBottom: 'max(1rem, env(safe-area-inset-bottom))',
           paddingLeft: 'max(1rem, env(safe-area-inset-left))',
@@ -1783,6 +1846,29 @@ export default function Scanner() {
             onScanAnother={clearOverlay}
             guides={guides}
           />
+        )}
+        {(frozen || cameraLive) && !voiceOn && !voiceCoachSeen && (
+          <div
+            role="status"
+            aria-label="Voice mode tip"
+            className="w-full rounded-xl bg-black/80 backdrop-blur-md border border-cyan-300/40 px-4 py-2 flex items-center gap-3"
+          >
+            <span
+              aria-hidden="true"
+              className="inline-block h-2.5 w-2.5 shrink-0 rounded-full bg-cyan-300"
+            />
+            <p className="flex-1 min-w-0 text-sm font-medium text-white">
+              Voice mode is in the ⋯ menu — go hands-free
+            </p>
+            <button
+              type="button"
+              onClick={dismissVoiceCoach}
+              aria-label="Dismiss voice tip"
+              className="min-h-[48px] min-w-[48px] shrink-0 rounded-lg px-3 text-lg font-bold leading-none text-white/80 active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+            >
+              <span aria-hidden="true">✕</span>
+            </button>
+          </div>
         )}
         <QueryBar onSubmit={(text) => void handlePhrase(text)} />
       </div>

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
 import { getShareWarning } from '../services/share'
 
@@ -46,6 +46,12 @@ interface QrShareProps {
   onClose?: () => void
   /** Hides the QR trigger button; the dialog still renders when open. */
   hideTrigger?: boolean
+  /**
+   * Initial dialog state for mounts that only exist while the dialog is
+   * already open (the header mounts a triggerless copy after its menu
+   * closes). Uncontrolled after mount.
+   */
+  defaultOpen?: boolean
 }
 
 /**
@@ -53,10 +59,11 @@ interface QrShareProps {
  * current page URL, but the user can paste an override (typically the
  * cloudflared tunnel URL) which is remembered across sessions.
  */
-export default function QrShare({ onOpen, onClose, hideTrigger = false }: QrShareProps = {}) {
-  const [open, setOpen] = useState(false)
+export default function QrShare({ onOpen, onClose, hideTrigger = false, defaultOpen = false }: QrShareProps = {}) {
+  const [open, setOpen] = useState(defaultOpen)
   const [url, setUrl] = useState(() => loadSavedUrl() ?? window.location.href)
   const [draft, setDraft] = useState(() => loadSavedUrl() ?? window.location.href)
+  const dialogRef = useRef<HTMLDivElement>(null)
 
   const openDialog = (): void => {
     setOpen(true)
@@ -77,11 +84,44 @@ export default function QrShare({ onOpen, onClose, hideTrigger = false }: QrShar
       if (event.key === 'Escape') {
         setOpen(false)
         onClose?.()
+        return
+      }
+      // Trap Tab inside the dialog while it is open.
+      if (event.key !== 'Tab' || !dialogRef.current) return
+      const focusables = Array.from(
+        dialogRef.current.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      )
+      if (focusables.length === 0) {
+        event.preventDefault()
+        return
+      }
+      const first = focusables[0]
+      const last = focusables[focusables.length - 1]
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [open, onClose])
+
+  // Move focus into the dialog on open and restore it on close/unmount.
+  // Deps are [open] only so an onClose identity change mid-dialog never
+  // yanks focus away and back.
+  useEffect(() => {
+    if (!open) return
+    const prev = document.activeElement
+    dialogRef.current?.focus()
+    return () => {
+      if (prev instanceof HTMLElement) prev.focus()
+    }
+  }, [open])
 
   const onDraftChange = (value: string): void => {
     setDraft(value)
@@ -115,7 +155,9 @@ export default function QrShare({ onOpen, onClose, hideTrigger = false }: QrShar
           role="presentation"
         >
           <div
-            className="flex flex-col items-center gap-3 rounded-lg bg-white p-6 max-w-full"
+            ref={dialogRef}
+            tabIndex={-1}
+            className="flex flex-col items-center gap-3 rounded-lg bg-white p-6 max-w-full outline-none"
             role="dialog"
             aria-modal="true"
             aria-label="Share via QR code"

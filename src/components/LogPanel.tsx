@@ -64,7 +64,7 @@ export default function LogPanel() {
         {open ? 'Hide Logs' : 'Logs'}
       </button>
       {open && (
-        <div className="w-[80vw] max-w-[calc(100vw-2rem)] rounded-lg bg-black/85 border border-white/20 p-3">
+        <div className="w-full max-w-full rounded-lg bg-black/85 border border-white/20 p-3">
           <div className="flex gap-2 mb-2">
             <button
               type="button"

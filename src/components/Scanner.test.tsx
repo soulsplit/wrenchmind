@@ -3016,6 +3016,12 @@ describe('Scanner freeze frame', () => {
   it('cancels the long-press when the finger drifts', async () => {
     vi.useFakeTimers()
     const media = mockMediaControls()
+    // Deterministic hold duration: the stage's drift branch keys off
+    // Date.now() - t0, which fake timers may or may not mock depending on
+    // the Vitest version. Pin the clock so the 1000ms hold past the 500ms
+    // long-press delay is explicit, not timing-dependent under happy-dom.
+    let now = 1_000_000
+    const dateSpy = vi.spyOn(Date, 'now').mockImplementation(() => now)
     try {
       mockCamera(true)
       const { container } = render(<Scanner />)
@@ -3037,6 +3043,9 @@ describe('Scanner freeze frame', () => {
       await act(async () => {
         fireEvent.pointerMove(layer, { clientX: 335, clientY: 220 })
       })
+      // Simulate the finger resting past the long-press delay while the
+      // 15px drift already cancelled the press timer.
+      now += 1000
       await act(async () => {
         await vi.advanceTimersByTimeAsync(1000)
       })
@@ -3050,6 +3059,7 @@ describe('Scanner freeze frame', () => {
       expect(segmentImage).toHaveBeenCalledTimes(segments)
       expect(screen.getByText('M6 hex bolt')).toBeInTheDocument()
     } finally {
+      dateSpy.mockRestore()
       media.restore()
       vi.useRealTimers()
     }
@@ -4093,6 +4103,11 @@ describe('Scanner live gestures', () => {
   it('treats a small live drift as a tap instead of swallowing it', async () => {
     mockCamera(true)
     const media = mockMediaControls()
+    // Deterministic tap duration: the drift branch swallows the release
+    // only when Date.now() - t0 >= 500ms. Pin the clock so a quick 15px
+    // slide can never look like a slipped long-press removal under
+    // happy-dom event batching.
+    const dateSpy = vi.spyOn(Date, 'now').mockReturnValue(2_000_000)
     try {
       const { container } = render(<Scanner />)
       setVideoDims(container, 640, 480)
@@ -4102,14 +4117,17 @@ describe('Scanner live gestures', () => {
       setTapRect(layer)
       // 15px drift: past the 10px press slop, short of a 24px circle span.
       // A finger tap that slides a little must still identify, not die.
-      fireEvent.pointerDown(layer, { pointerId: 1, clientX: 100, clientY: 100 })
-      fireEvent.pointerMove(layer, { pointerId: 1, clientX: 115, clientY: 100 })
-      fireEvent.pointerUp(layer, { pointerId: 1, clientX: 115, clientY: 100 })
+      await act(async () => {
+        fireEvent.pointerDown(layer, { pointerId: 1, clientX: 100, clientY: 100 })
+        fireEvent.pointerMove(layer, { pointerId: 1, clientX: 115, clientY: 100 })
+        fireEvent.pointerUp(layer, { pointerId: 1, clientX: 115, clientY: 100 })
+      })
       await act(async () => {
         fireEvent.click(layer, { clientX: 115, clientY: 100 })
       })
       expect(segmentImage).toHaveBeenCalledTimes(1)
     } finally {
+      dateSpy.mockRestore()
       media.restore()
     }
   })

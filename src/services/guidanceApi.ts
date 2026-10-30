@@ -1,6 +1,7 @@
 import type { GuidanceResult, GuidanceSource, GuidanceSpec, GuidanceStep } from '../types'
 import { logDebug, logError, logWarn } from './logger'
 import { cleanString, errorDetail, fetchWithTimeout, isRecord } from './http'
+import { hasApiKey } from './metaApi'
 
 const BASE = 'https://api.meta.ai/v1'
 const GUIDANCE_TIMEOUT_MS = 60000
@@ -23,8 +24,23 @@ export const UNGROUNDED_WARNING =
  * Raw API key; undefined when unset (callers rely on the pipeline's
  * hasApiKey() gate — an unguarded call sends a literal "Bearer undefined").
  */
-function key(): string {
-  return import.meta.env.VITE_META_MODEL_API_KEY as string
+function key(): string | undefined {
+  return import.meta.env.VITE_META_MODEL_API_KEY
+}
+
+/**
+ * Guarded accessor sharing metaApi's hasApiKey() gate so no request ever
+ * sends a literal "Bearer undefined" header.
+ */
+function requireKey(): string {
+  if (!hasApiKey()) {
+    throw new Error('API key missing: set VITE_META_MODEL_API_KEY in .env')
+  }
+  const value = key()
+  if (value === undefined || value.length === 0) {
+    throw new Error('API key missing: set VITE_META_MODEL_API_KEY in .env')
+  }
+  return value
 }
 
 /**
@@ -263,6 +279,7 @@ export async function fetchGuidance(
   phrase: string,
   context: string,
 ): Promise<GuidanceResult> {
+  const apiKey = requireKey()
   const cacheId = cacheKey(label, phrase)
   const cached = guidanceCache.get(cacheId)
   if (cached) {
@@ -275,7 +292,7 @@ export async function fetchGuidance(
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${key()}`,
+        Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
         model: MODEL,

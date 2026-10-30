@@ -11,13 +11,29 @@ const SEGMENT_TIMEOUT_MS = 60000
  * Raw API key; undefined when unset (every caller must gate on hasApiKey()
  * first — an unguarded call sends a literal "Bearer undefined" header).
  */
-function key(): string {
-  return import.meta.env.VITE_META_MODEL_API_KEY as string
+function key(): string | undefined {
+  return import.meta.env.VITE_META_MODEL_API_KEY
 }
 
 export function hasApiKey(): boolean {
   const value = import.meta.env.VITE_META_MODEL_API_KEY
   return typeof value === 'string' && value.length > 0
+}
+
+/**
+ * Guarded accessor: throws when the key is missing so no request ever
+ * sends a literal "Bearer undefined" header. Callers must still gate UI
+ * on hasApiKey() for a friendly error; this is the last line of defense.
+ */
+function requireKey(): string {
+  if (!hasApiKey()) {
+    throw new Error('API key missing: set VITE_META_MODEL_API_KEY in .env')
+  }
+  const value = key()
+  if (value === undefined || value.length === 0) {
+    throw new Error('API key missing: set VITE_META_MODEL_API_KEY in .env')
+  }
+  return value
 }
 
 /**
@@ -192,6 +208,7 @@ export async function reasonSpatial(
   phrase: string,
   context: string,
 ): Promise<SpatialResult> {
+  const apiKey = requireKey()
   const frames = Array.isArray(images) ? images : [images]
   const queryText =
     frames.length > 1
@@ -203,7 +220,7 @@ export async function reasonSpatial(
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${key()}`,
+        Authorization: `Bearer ${apiKey}`,
       },
     body: JSON.stringify({
       model: 'muse-spark-1.3',
@@ -253,13 +270,14 @@ export const MAX_LABEL_FINDINGS = 10
  * (key-value pairs kept together); empty when nothing is legible.
  */
 export async function extractLabelText(image: string): Promise<string[]> {
+  const apiKey = requireKey()
   const res = await fetchWithTimeout(
     `${BASE}/chat/completions`,
     {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${key()}`,
+        Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
         model: 'muse-spark-1.3',
@@ -312,13 +330,14 @@ export const MAX_IDENTIFY_LABEL = 80
  * speech).
  */
 export async function identifyComponent(image: string): Promise<string> {
+  const apiKey = requireKey()
   const res = await fetchWithTimeout(
     `${BASE}/chat/completions`,
     {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${key()}`,
+        Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
         model: 'muse-spark-1.3',
@@ -481,13 +500,14 @@ export async function* segmentImage(
           })),
         })
       : nounPhrase
+  const apiKey = requireKey()
   const res = await fetchWithTimeout(
     `${BASE}/responses`,
     {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${key()}`,
+        Authorization: `Bearer ${apiKey}`,
       },
     body: JSON.stringify({
       model: 'sam-3.1',

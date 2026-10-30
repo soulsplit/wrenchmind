@@ -1,4 +1,5 @@
 import type { MemoryEntry } from '../types'
+import { hasApiKey } from './metaApi'
 import { permissionBlocker, secureContextBlocker } from './mediaSupport'
 import { logDebug, logError, logInfo, logWarn } from './logger'
 import {
@@ -59,6 +60,8 @@ export class VoiceAssistant {
   private workletNode: AudioWorkletNode | null = null
   private memory: MemoryEntry[] = []
   private callbacks: VoiceAssistantCallbacks
+  /** Audio chunks dropped by backpressure; reset per connection. */
+  private droppedChunks = 0
   /** Bumped on every start()/stop() so stale async continuations bail out. */
   private startEpoch = 0
 
@@ -68,6 +71,11 @@ export class VoiceAssistant {
 
   isListening(): boolean {
     return this.listening
+  }
+
+  /** Audio chunks dropped by backpressure on the current connection. */
+  getDroppedChunks(): number {
+    return this.droppedChunks
   }
 
   getMemory(): MemoryEntry[] {
@@ -99,8 +107,8 @@ export class VoiceAssistant {
       this.callbacks.onError('Speech recognition not supported on this device')
       return
     }
-    const apiKey = import.meta.env.VITE_META_MODEL_API_KEY as string
-    if (!apiKey) {
+    const apiKey = import.meta.env.VITE_META_MODEL_API_KEY
+    if (!hasApiKey() || typeof apiKey !== 'string' || apiKey.length === 0) {
       logError('voice', 'missing VITE_META_MODEL_API_KEY')
       this.callbacks.onError('API key missing: set VITE_META_MODEL_API_KEY in .env')
       return
@@ -180,12 +188,19 @@ export class VoiceAssistant {
     this.restartAttempts = 0
     const ws = this.ws
     if (ws && ws.readyState === WebSocket.OPEN) {
-      // Graceful end: signal end-of-stream and keep reading to server close.
-      this.closing = true
-      try {
-        ws.send(JSON.stringify({ type: 'endStream' }))
-      } catch {
-        this.teardownSocket()
+      // Graceful end: signal end-of-stream and keep the socket draining to
+      // the server close so the final endpointing transcript is captured.
+      // Media teardown waits for finishClose/the close timeout; tearing it
+      // down first would drop the mic while the drain is still in flight.
+      if (!this.closing) {
+        this.closing = true
+        try {
+          ws.send(JSON.stringify({ type: 'endStream' }))
+        } catch {
+          this.teardownSocket()
+          this.teardownMedia()
+          return
+        }
       }
       if (this.ws === ws) {
         this.clearCloseTimer()
@@ -194,21 +209,32 @@ export class VoiceAssistant {
           if (this.ws === ws) {
             logWarn('voice', 'server close timed out; forcing close')
             this.teardownSocket()
+            this.teardownMedia()
           }
         }, CLOSE_TIMEOUT_MS)
       }
     } else {
       this.teardownSocket()
+      this.teardownMedia()
     }
-    this.teardownMedia()
   }
 
   private connect(): void {
     if (!this.listening) return
+    // Shared key gate (see metaApi.hasApiKey): never open the transcribe
+    // socket without a key, so no handshake can send "Bearer undefined".
+    // Restart paths can reach connect() long after start()'s gate.
+    const apiKey = import.meta.env.VITE_META_MODEL_API_KEY
+    if (!hasApiKey() || typeof apiKey !== 'string' || apiKey.length === 0) {
+      logError('voice', 'missing VITE_META_MODEL_API_KEY')
+      this.callbacks.onError('API key missing: set VITE_META_MODEL_API_KEY in .env')
+      this.stop()
+      return
+    }
     this.teardownSocket()
     this.acked = false
     this.closing = false
-    const apiKey = import.meta.env.VITE_META_MODEL_API_KEY as string
+    this.droppedChunks = 0
     const ws = new WebSocket(REALTIME_URL)
     ws.binaryType = 'arraybuffer'
     this.ws = ws
@@ -260,8 +286,23 @@ export class VoiceAssistant {
       logWarn('voice', 'ignoring malformed transcribe frame')
       return
     }
-    // The typeless {sessionId} ack gates all audio.
-    if (typeof msg['sessionId'] === 'string' && msg['type'] === undefined) {
+    // The {sessionId} ack gates all audio: the server sends it typelessly,
+    // but also accept a typed session-created frame so audio gating cannot
+    // lock permanently if the wire contract gains a type discriminator.
+    // Other typed frames carrying a sessionId (e.g. transcript partials)
+    // are not the ack.
+    const frameType = msg['type']
+    if (
+      typeof msg['sessionId'] === 'string' &&
+      (frameType === undefined ||
+        (typeof frameType === 'string' && /session/i.test(frameType)))
+    ) {
+      this.acked = true
+      this.clearAckTimer()
+      logInfo('voice', 'transcribe session acknowledged')
+      return
+    }
+    if (typeof frameType === 'string' && /session[-_ ]?created/i.test(frameType)) {
       this.acked = true
       this.clearAckTimer()
       logInfo('voice', 'transcribe session acknowledged')
@@ -301,7 +342,17 @@ export class VoiceAssistant {
     if (!ws || ws.readyState !== WebSocket.OPEN) return
     if (!(chunk instanceof ArrayBuffer) || chunk.byteLength === 0) return
     // Blocks arrive in real time; drop (never queue) past ~5s buffered.
-    if (ws.bufferedAmount + chunk.byteLength > MAX_BUFFERED_BYTES) return
+    // Drops stay silent on the wire but surface via a counter and a
+    // throttled warn so slow networks are visible in the log.
+    if (ws.bufferedAmount + chunk.byteLength > MAX_BUFFERED_BYTES) {
+      this.droppedChunks += 1
+      if (this.droppedChunks === 1 || this.droppedChunks % 50 === 0) {
+        logWarn('voice', `transcribe backpressure: dropped ${this.droppedChunks} audio chunk(s)`)
+      } else {
+        logDebug('voice', `transcribe backpressure: dropped chunk ${this.droppedChunks}`)
+      }
+      return
+    }
     try {
       ws.send(chunk)
     } catch {
@@ -339,6 +390,9 @@ export class VoiceAssistant {
     this.closing = false
     this.acked = false
     logInfo('voice', `transcribe session closed (${code})`)
+    // Graceful-stop drain complete: release the mic graph now that the
+    // final endpointing transcript has had its chance to arrive.
+    this.teardownMedia()
   }
 
   private teardownSocket(): void {

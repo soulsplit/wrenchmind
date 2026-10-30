@@ -120,7 +120,12 @@ export class SpeechService {
       this.task = task
       void this.resolveVoice().then(
         (voice) => {
-          if (mine !== this.seq || this.task !== task) return
+          if (mine !== this.seq || this.task !== task) {
+            // Preempted while voices resolved: settle the orphaned promise.
+            // cancelSpeech() normally resolves it first; resolve is idempotent.
+            task.resolve()
+            return
+          }
           task.voice = voice
           logDebug('speech', `speaking ${chunks.length} chunk(s), ${text.length} chars`)
           this.speakNext(task)
@@ -128,8 +133,8 @@ export class SpeechService {
         () => {
           if (this.task === task) {
             this.task = null
-            task.resolve()
           }
+          task.resolve()
         },
       )
     })
