@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { SpeechService, splitSpeechChunks } from './speechOutput'
+import {
+  SpeechService,
+  normalizeForSpeech,
+  splitSpeechChunks,
+} from './speechOutput'
 import { clearLogs, getLogs } from './logger'
 
 class FakeVoice {
@@ -259,5 +263,89 @@ describe('SpeechService', () => {
       { name: 'A', lang: 'en-US' },
       { name: 'B', lang: 'de-DE' },
     ])
+  })
+})
+
+describe('normalizeForSpeech', () => {
+  it('strips markdown the voice would read aloud', () => {
+    expect(normalizeForSpeech('**Step 1:** Remove the `belt` cover')).toBe(
+      'Step 1: Remove the belt cover',
+    )
+    expect(normalizeForSpeech('[torque specs](https://example.com) here')).toBe(
+      'torque specs here',
+    )
+    expect(normalizeForSpeech('# Heading and > quote')).toBe('Heading and quote')
+  })
+
+  it('expands part codes and units into speakable words', () => {
+    expect(normalizeForSpeech('M6 hex bolt')).toBe('M six hex bolt')
+    expect(normalizeForSpeech('Torx T25 driver')).toBe('Torx T two five driver')
+    expect(normalizeForSpeech('24V DC supply, 8mm at 60Hz')).toBe(
+      '24 volt D C supply, 8 millimeters at 60 hertz',
+    )
+  })
+
+  it('replaces mangled punctuation with words', () => {
+    expect(normalizeForSpeech('A · B × C → D & E')).toBe('A , B by C , then D and E')
+  })
+})
+
+describe('SpeechService voice selection', () => {
+  const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
+
+  afterEach(() => {
+    window.localStorage.removeItem('wrenchmind.ttsVoice')
+  })
+
+  it('prefers curated platform voices over plain ones', async () => {
+    installSynth([new FakeVoice('Plain US', 'en-US'), new FakeVoice('Google US English', 'en-US')])
+    const service = new SpeechService()
+    const done = service.speakText('Hi.')
+    await flush()
+    expect(synth.spoken[0].voice?.name).toBe('Google US English')
+    synth.endLast()
+    await done
+  })
+
+  it('honors a pinned override voice and clears back to auto-pick', async () => {
+    const plain = new FakeVoice('Plain US', 'en-US')
+    const other = new FakeVoice('Other Voice', 'en-US')
+    installSynth([plain, other])
+    const service = new SpeechService()
+    service.setPreferredVoiceName('Other Voice')
+    const first = service.speakText('Hi.')
+    await flush()
+    expect(synth.spoken[0].voice).toBe(other)
+    synth.endLast()
+    await first
+    service.setPreferredVoiceName(null)
+    const second = service.speakText('Hi.')
+    await flush()
+    expect(synth.spoken[synth.spoken.length - 1]?.voice).toBe(plain)
+    synth.endLast()
+    await second
+  })
+
+  it('warms up the voice without speaking', async () => {
+    installSynth([new FakeVoice('Warm Voice', 'en-US')])
+    const service = new SpeechService()
+    await service.warmUp()
+    expect(synth.spoken).toHaveLength(0)
+    const done = service.speakText('Hi.')
+    await flush()
+    expect(synth.spoken).toHaveLength(1)
+    expect(synth.spoken[0].voice?.name).toBe('Warm Voice')
+    synth.endLast()
+    await done
+  })
+
+  it('speaks normalized text, not raw markdown', async () => {
+    installSynth([new FakeVoice('Default', 'en-US')])
+    const service = new SpeechService()
+    const done = service.speakText('Fit the **M6** bolt.')
+    await flush()
+    expect(synth.spoken[0].text).toBe('Fit the M six bolt.')
+    synth.endLast()
+    await done
   })
 })

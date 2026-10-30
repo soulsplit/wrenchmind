@@ -10,7 +10,36 @@ export const CLOSE_TIMEOUT_MS = 5000
 /** ~5s of 24kHz s16le mono; sends past this are dropped, never queued. */
 export const MAX_BUFFERED_BYTES = TARGET_SAMPLE_RATE * 2 * 5
 export const LANGUAGE_BIAS = ['English']
-export const KEYWORDS = ['bolt', 'torque', 'hex', 'Torx', 'gasket', 'valve', 'bearing', 'fuse']
+/**
+ * Domain terms the recognizer otherwise mishears: part vocabulary plus the
+ * hands-free step commands ("done", "back", "repeat", ...) so short control
+ * utterances survive endpointing intact. Biasing steers, never guarantees.
+ */
+export const KEYWORDS = [
+  'bolt',
+  'torque',
+  'hex',
+  'Torx',
+  'gasket',
+  'valve',
+  'bearing',
+  'fuse',
+  'washer',
+  'nut',
+  'screw',
+  'belt',
+  'filter',
+  'sensor',
+  'pump',
+  'plug',
+  'wire',
+  'clip',
+  'done',
+  'back',
+  'repeat',
+  'next',
+  'previous',
+]
 
 export interface TranscribeHandshake {
   authorization: { accessToken: string }

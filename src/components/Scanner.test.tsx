@@ -21,7 +21,16 @@ import {
 import { parseSamStream } from '../services/samParser'
 import { fetchGuidance } from '../services/guidanceApi'
 import { searchGuides } from '../services/ifixitApi'
-import { cancelSpeech, speakText } from '../services/speechOutput'
+import {
+  cancelSpeech,
+  getAvailableVoices,
+  getPreferredVoiceName,
+  isSpeaking,
+  playAckBlip,
+  setPreferredVoiceName,
+  speakText,
+  warmUpSpeechVoices,
+} from '../services/speechOutput'
 import { useKeyboardShift } from '../hooks/useKeyboardShift'
 import { useDesktopLayout } from '../hooks/useDesktopLayout'
 import type { SamStreamEvent } from '../services/metaApi'
@@ -77,6 +86,10 @@ vi.mock('../services/speechOutput', () => ({
   cancelSpeech: vi.fn(),
   isSpeaking: vi.fn(),
   getAvailableVoices: vi.fn(),
+  getPreferredVoiceName: vi.fn(),
+  setPreferredVoiceName: vi.fn(),
+  warmUpSpeechVoices: vi.fn(),
+  playAckBlip: vi.fn(),
 }))
 
 vi.mock('../hooks/useKeyboardShift', () => ({
@@ -314,6 +327,12 @@ beforeEach(() => {
   vi.mocked(searchGuides).mockReset().mockResolvedValue([])
   vi.mocked(speakText).mockReset().mockResolvedValue(undefined)
   vi.mocked(cancelSpeech).mockReset()
+  vi.mocked(isSpeaking).mockReset().mockReturnValue(false)
+  vi.mocked(getAvailableVoices).mockReset().mockResolvedValue([])
+  vi.mocked(getPreferredVoiceName).mockReset().mockReturnValue(null)
+  vi.mocked(setPreferredVoiceName).mockReset()
+  vi.mocked(warmUpSpeechVoices).mockReset()
+  vi.mocked(playAckBlip).mockReset()
   vi.mocked(useKeyboardShift).mockReset().mockReturnValue(0)
   vi.mocked(useDesktopLayout).mockReset().mockReturnValue(false)
 })
@@ -830,6 +849,138 @@ describe('Scanner', () => {
     const calls = vi.mocked(speakText).mock.calls
     const lastSpoken = calls[calls.length - 1][0] as string
     expect(lastSpoken).toContain('Step 1 of 3')
+  })
+
+  describe('voice conversation', () => {
+    it('strips wake words before dispatch', async () => {
+      mockCamera(true)
+      vi.mocked(reasonSpatial).mockResolvedValue({
+        target_label: 'Screw',
+        approx_x: 10,
+        approx_y: 10,
+        speech_response: null,
+        display_mode: 'visual_only',
+      })
+      vi.mocked(fetchGuidance).mockResolvedValue(validGuidanceFixture)
+      render(<Scanner />)
+      await enableVoiceMode()
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('show screws')
+      })
+      expect(await screen.findByText('Remove the belt cover')).toBeInTheDocument()
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('hey wrenchmind, done')
+      })
+      expect(await screen.findByText('Step 2 of 3')).toBeInTheDocument()
+    })
+
+    it('drops the app’s own speech feeding back through the mic', async () => {
+      mockCamera(true)
+      vi.mocked(reasonSpatial).mockResolvedValue({
+        target_label: 'Screw',
+        approx_x: 10,
+        approx_y: 10,
+        speech_response: 'Found the alternator screw right here.',
+        display_mode: 'speech_and_visual',
+      })
+      vi.mocked(fetchGuidance).mockResolvedValue(validGuidanceFixture)
+      render(<Scanner />)
+      await enableVoiceMode()
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('show screws')
+      })
+      await waitFor(() => expect(speakText).toHaveBeenCalled())
+      // Let the fire-and-forget reply stamp its echo window.
+      await act(async () => {})
+      const calls = vi.mocked(reasonSpatial).mock.calls.length
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('Found the alternator screw right here.')
+      })
+      expect(vi.mocked(reasonSpatial).mock.calls.length).toBe(calls)
+      // Short control words still pass even when the reply mentioned them.
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('repeat')
+      })
+      expect(vi.mocked(reasonSpatial).mock.calls.length).toBe(calls)
+    })
+
+    it('yields the floor when the user barges in', async () => {
+      mockCamera(true)
+      render(<Scanner />)
+      await enableVoiceMode()
+      vi.mocked(isSpeaking).mockReturnValue(true)
+      assistants[0].callbacks.onSpeechStart?.()
+      expect(cancelSpeech).toHaveBeenCalledTimes(1)
+      vi.mocked(isSpeaking).mockReturnValue(false)
+      assistants[0].callbacks.onSpeechStart?.()
+      expect(cancelSpeech).toHaveBeenCalledTimes(1)
+    })
+
+    it('blips when the turn endpoint lands', async () => {
+      mockCamera(true)
+      render(<Scanner />)
+      await enableVoiceMode()
+      assistants[0].callbacks.onSpeechEnd?.()
+      expect(playAckBlip).toHaveBeenCalledTimes(1)
+    })
+
+    it('captions interim speech and clears on dispatch', async () => {
+      mockCamera(true)
+      vi.mocked(reasonSpatial).mockResolvedValue({
+        target_label: 'Screw',
+        approx_x: 10,
+        approx_y: 10,
+        speech_response: null,
+        display_mode: 'visual_only',
+      })
+      render(<Scanner />)
+      await enableVoiceMode()
+      expect(screen.queryByTestId('voice-caption')).not.toBeInTheDocument()
+      await act(async () => {
+        assistants[0].callbacks.onInterim?.('show the scr')
+      })
+      expect(screen.getByTestId('voice-caption')).toHaveTextContent('show the scr')
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('show screws')
+      })
+      expect(screen.queryByTestId('voice-caption')).not.toBeInTheDocument()
+    })
+
+    it('offers a voice picker that pins the speech voice', async () => {
+      mockCamera(true)
+      vi.mocked(getAvailableVoices).mockResolvedValue([
+        { name: 'Test Voice', lang: 'en-US' },
+      ])
+      render(<Scanner />)
+      await enableVoiceMode()
+      expect(warmUpSpeechVoices).toHaveBeenCalled()
+      openOverflow()
+      const select = screen.getByLabelText('Speech voice')
+      expect(select).toHaveValue('')
+      fireEvent.change(select, { target: { value: 'Test Voice' } })
+      expect(setPreferredVoiceName).toHaveBeenCalledWith('Test Voice')
+    })
+
+    it('nudges after sustained silence in voice mode', async () => {
+      vi.useFakeTimers()
+      try {
+        mockCamera(true)
+        render(<Scanner />)
+        await enableVoiceMode()
+        vi.mocked(speakText).mockClear()
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(119_000)
+        })
+        expect(speakText).not.toHaveBeenCalled()
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(1000)
+        })
+        expect(speakText).toHaveBeenCalledTimes(1)
+        expect(vi.mocked(speakText).mock.calls[0][0]).toMatch(/Still here/)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
   })
 
   it('does not hijack phrases that merely contain command words', async () => {

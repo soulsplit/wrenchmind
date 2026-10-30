@@ -10,6 +10,9 @@ function renderHeader(overrides: Partial<Parameters<typeof Header>[0]> = {}) {
     tracking: false,
     voiceOn: false,
     onVoiceToggle: vi.fn(),
+    voices: [],
+    voiceName: null,
+    onVoiceNameChange: vi.fn(),
     facing: 'environment' as const,
     multiCamera: true,
     onSwitchCamera: vi.fn(),
@@ -339,6 +342,9 @@ describe('Header', () => {
         tracking={false}
         voiceOn={false}
         onVoiceToggle={vi.fn()}
+        voices={[]}
+        voiceName={null}
+        onVoiceNameChange={vi.fn()}
         facing="environment"
         multiCamera
         onSwitchCamera={vi.fn()}
@@ -359,6 +365,9 @@ describe('Header', () => {
         tracking={false}
         voiceOn={false}
         onVoiceToggle={vi.fn()}
+        voices={[]}
+        voiceName={null}
+        onVoiceNameChange={vi.fn()}
         facing="environment"
         multiCamera
         onSwitchCamera={vi.fn()}
@@ -384,6 +393,9 @@ describe('Header', () => {
       tracking: false,
       voiceOn: false,
       onVoiceToggle: vi.fn(),
+      voices: [],
+      voiceName: null,
+      onVoiceNameChange: vi.fn(),
       facing: 'environment' as const,
       multiCamera: true,
       onSwitchCamera: vi.fn(),
@@ -408,5 +420,30 @@ describe('Header', () => {
     expect(text).toHaveClass('truncate')
     expect(text.parentElement).toHaveClass('max-w-full')
     expect(text.parentElement).toHaveAttribute('title', 'Drag to circle a part · tap to identify')
+  })
+
+  it('lists speech voices behind the overflow with an auto default', () => {
+    const props = renderHeader({
+      voices: [
+        { name: 'Voice A', lang: 'en-US' },
+        { name: 'Voice B', lang: 'en-GB' },
+      ],
+    })
+    expect(screen.queryByLabelText('Speech voice')).not.toBeInTheDocument()
+    openOverflow()
+    const select = screen.getByLabelText('Speech voice')
+    expect(select).toHaveValue('')
+    fireEvent.change(select, { target: { value: 'Voice B' } })
+    expect(props.onVoiceNameChange).toHaveBeenCalledWith('Voice B')
+    expect(screen.getByRole('option', { name: 'Auto (recommended)' })).toBeInTheDocument()
+  })
+
+  it('reflects the pinned voice selection', () => {
+    renderHeader({
+      voices: [{ name: 'Voice A', lang: 'en-US' }],
+      voiceName: 'Voice A',
+    })
+    openOverflow()
+    expect(screen.getByLabelText('Speech voice')).toHaveValue('Voice A')
   })
 })

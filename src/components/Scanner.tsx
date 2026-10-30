@@ -33,7 +33,18 @@ import {
   type ZoomState,
 } from '../services/feedStage'
 import { parseSamStream, scaleRecordToVideo } from '../services/samParser'
-import { cancelSpeech, speakText } from '../services/speechOutput'
+import {
+  cancelSpeech,
+  getAvailableVoices,
+  getPreferredVoiceName,
+  isSpeaking,
+  playAckBlip,
+  setPreferredVoiceName,
+  speakText,
+  warmUpSpeechVoices,
+  type SpeechVoiceInfo,
+} from '../services/speechOutput'
+import { idleNudgeDue, isSelfEcho, repairVoicePhrase } from '../services/voicePhrasing'
 import { fetchGuidance } from '../services/guidanceApi'
 import { buildQuery, searchGuides, type FixitGuide } from '../services/ifixitApi'
 import { downloadReport, shareReport } from '../services/report'
@@ -221,6 +232,18 @@ export default function Scanner() {
   const assistantRef = useRef<VoiceAssistant | null>(null)
   const voiceOnRef = useRef(false)
   voiceOnRef.current = voiceOn
+  /** Live interim transcript shown as a caption while the user speaks. */
+  const [caption, setCaption] = useState('')
+  /** Voices for the voice picker; loaded when voice mode turns on. */
+  const [voices, setVoices] = useState<SpeechVoiceInfo[]>([])
+  const [voiceName, setVoiceName] = useState<string | null>(null)
+  /**
+   * Last spoken reply plus when it finished: guards the self-echo check so
+   * the app's own speaker output feeding the mic never becomes a query.
+   */
+  const lastSpokenRef = useRef<{ text: string; endedAtMs: number } | null>(null)
+  /** Last user-phrase (or voice-enable) time; drives the idle reprompt. */
+  const lastActivityRef = useRef(0)
   const busyRef = useRef(false)
   /** FIFO of phrases spoken while analysis is in flight; drained in order. */
   const pendingRef = useRef<string[]>([])
@@ -773,7 +796,15 @@ export default function Scanner() {
   const speakReply = useCallback(async (text: string): Promise<void> => {
     if (!voiceOnRef.current) return
     setStatus('speaking')
-    await speakText(text)
+    try {
+      await speakText(text)
+    } finally {
+      // Stamp even on cancel/preempt: the echo window must cover whatever
+      // the speaker actually emitted, including cut-off speech. Yield back
+      // to listening only when no newer reply took over mid-flight.
+      lastSpokenRef.current = { text, endedAtMs: Date.now() }
+      if (voiceOnRef.current && !isSpeaking()) setStatus('listening')
+    }
   }, [])
 
   /**
@@ -861,12 +892,30 @@ export default function Scanner() {
   // Identity must stay stable (all deps []-stable): the voice effect
   // resubscribes on change, which would recreate the recognizer mid-listen.
   const handlePhrase = useCallback(async (phrase: string) => {
+    // Normalize first: wake words and punctuation never reach the queue,
+    // the step matcher, or the reasoner.
+    phrase = repairVoicePhrase(phrase)
+    if (!phrase) return
+    // Drop the app's own speaker output feeding back through the mic; short
+    // control words always pass (see isSelfEcho).
+    const lastSpoken = lastSpokenRef.current
+    if (
+      lastSpoken &&
+      isSelfEcho(phrase, lastSpoken.text, lastSpoken.endedAtMs, Date.now())
+    ) {
+      logInfo('phrase', `dropped self-echo: "${phrase}"`)
+      return
+    }
     // Serialize analyses; phrases spoken mid-flight queue FIFO and drain in order.
     if (busyRef.current) {
       pendingRef.current.push(phrase)
       return
     }
     busyRef.current = true
+    // A dispatched phrase replaces the interim caption; stamp activity so
+    // the idle reprompt only fires on real silence.
+    setCaption('')
+    lastActivityRef.current = Date.now()
     try {
       const { el, w: vw, h: vh } = frameTarget()
       const assistant = assistantRef.current
@@ -899,8 +948,12 @@ export default function Scanner() {
           ? 'Procedure complete.'
           : `Step ${next + 1} of ${count}: ${step.title}. ${step.detail}${step.warning ? ` Warning: ${step.warning}` : ''}`
         logInfo('step', `"${phrase}" → step ${next + 1}/${count}`)
-        await speakReply(line)
-        setStatus(voiceOnRef.current ? 'listening' : 'off')
+        // Fire-and-forget: speech must not block the next query — a new
+        // phrase barges in and preempts this reply via cancelSpeech.
+        void speakReply(line)
+        // speakReply owns the speaking→listening transition; the caller
+        // only resets status when voice is off and speech no-ops.
+        if (!voiceOnRef.current) setStatus('off')
         return
       }
       // Label reads bypass spatial reasoning: one frame, one transcription
@@ -915,13 +968,13 @@ export default function Scanner() {
           const found = await extractLabelText(frame)
           if (found.length === 0) {
             logInfo('label', 'no legible markings')
-            await speakReply('I could not read any markings. Try moving closer.')
+            void speakReply('I could not read any markings. Try moving closer.')
           } else {
             setFindings(found)
             logInfo('label', `${found.length} markings: ${found.slice(0, 3).join('; ')}`)
-            await speakReply(`Label reads: ${found.join('. ')}`)
+            void speakReply(`Label reads: ${found.join('. ')}`)
           }
-          setStatus(voiceOnRef.current ? 'listening' : 'off')
+          if (!voiceOnRef.current) setStatus('off')
         } catch (e) {
           logError('label', e instanceof Error ? e.message : String(e))
           setStatus('error')
@@ -1018,9 +1071,9 @@ export default function Scanner() {
         // Speak only in speech_and_visual mode with a non-null response.
         // visual_only and null responses stay silent (visual-only).
         if (result.display_mode === 'speech_and_visual' && result.speech_response) {
-          await speakReply(result.speech_response)
+          void speakReply(result.speech_response)
         }
-        setStatus(voiceOnRef.current ? 'listening' : 'off')
+        if (!voiceOnRef.current) setStatus('off')
       } catch (e) {
         logError('phrase', e instanceof Error ? e.message : String(e))
         setStatus('error')
@@ -1133,8 +1186,8 @@ export default function Scanner() {
           phrase: 'tap to outline',
           channel: 'tap',
         })
-        await speakReply(name || 'I could not identify this part.')
-        setStatus(voiceOnRef.current ? 'listening' : 'off')
+        void speakReply(name || 'I could not identify this part.')
+        if (!voiceOnRef.current) setStatus('off')
       } catch (e) {
         logError('tap', e instanceof Error ? e.message : String(e))
         setStatus('error')
@@ -1226,8 +1279,8 @@ export default function Scanner() {
           phrase: 'circle to identify',
           channel: 'circle',
         })
-        await speakReply(name || 'I could not identify this part.')
-        setStatus(voiceOnRef.current ? 'listening' : 'off')
+        void speakReply(name || 'I could not identify this part.')
+        if (!voiceOnRef.current) setStatus('off')
       } catch (e) {
         logError('circle', e instanceof Error ? e.message : String(e))
         setStatus('error')
@@ -1286,6 +1339,23 @@ export default function Scanner() {
   useEffect(() => {
     const assistant = new VoiceAssistant({
       onPhrase: (phrase) => void handlePhrase(phrase),
+      onInterim: (transcript) => {
+        // Live captions while the user speaks; cleared on dispatch.
+        if (voiceOnRef.current) setCaption(transcript)
+      },
+      onSpeechStart: () => {
+        // Barge-in: the user started talking over the reply — stop speaking
+        // and yield the floor. Echo cancellation plus the self-echo guard
+        // keep our own speaker output from becoming a phantom query.
+        if (isSpeaking()) {
+          cancelSpeech()
+          logInfo('voice', 'barge-in: yielding to user')
+        }
+      },
+      onSpeechEnd: () => {
+        // Turn endpoint heard: blip so the user knows the app is on it.
+        playAckBlip()
+      },
       onError: (message) => {
         setError(message)
         setVoiceOn(false)
@@ -1307,15 +1377,46 @@ export default function Scanner() {
       setStatus('listening')
       await assistant.start()
       setVoiceOn(assistant.isListening())
-      if (!assistant.isListening()) setStatus('off')
+      if (!assistant.isListening()) {
+        setStatus('off')
+        return
+      }
+      // Fresh turn: warm the speech voice, expose the picker list, and
+      // stamp activity so the idle nudge measures from enable time.
+      void warmUpSpeechVoices()
+      setVoiceName(getPreferredVoiceName())
+      void getAvailableVoices().then(setVoices)
+      setCaption('')
+      lastActivityRef.current = Date.now()
     } else {
       assistant.stop()
       clearRefresh()
       cancelSpeech()
       setVoiceOn(false)
+      setCaption('')
       setStatus('off')
     }
   }
+
+  const handleVoiceNameChange = useCallback((name: string | null) => {
+    setPreferredVoiceName(name)
+    setVoiceName(name)
+    logInfo('speech', name ? `voice pinned: ${name}` : 'voice back to auto-pick')
+  }, [])
+
+  // Idle reprompt: after sustained silence in voice mode, nudge once per
+  // idle window instead of sitting mute. Resets on every user phrase.
+  useEffect(() => {
+    if (!voiceOn) return
+    const timer = window.setInterval(() => {
+      if (!voiceOnRef.current) return
+      if (idleNudgeDue(lastActivityRef.current, Date.now())) {
+        lastActivityRef.current = Date.now()
+        void speakReply('Still here — ask about a part, or say done, back, or repeat.')
+      }
+    }, 30_000)
+    return () => window.clearInterval(timer)
+  }, [voiceOn, speakReply])
 
   // Full scene reset. Zoom intentionally persists (view preference, not
   // scene data); queued pendingRef phrases and an in-flight trace also
@@ -1732,6 +1833,9 @@ export default function Scanner() {
         frozen={frozen}
         onFreezeToggle={(next) => void setFrozenMode(next)}
         hint={(frozen || cameraLive) ? HINTS[hintIndex % HINTS.length] : null}
+        voices={voices}
+        voiceName={voiceName}
+        onVoiceNameChange={handleVoiceNameChange}
       />
       {/*
         Bottom dock: error toast, HUD card, and thumb-reachable query input
@@ -1894,6 +1998,21 @@ export default function Scanner() {
             >
               <span aria-hidden="true">✕</span>
             </button>
+          </div>
+        )}
+        {/*
+          Live interim transcript while the user speaks. Transient and
+          replaced by analysis ("Analyzing…") the moment a turn dispatches.
+        */}
+        {voiceOn && caption && status !== 'analyzing' && (
+          <div
+            role="status"
+            aria-label="Hearing you"
+            data-testid="voice-caption"
+            className="pointer-events-none self-center inline-flex max-w-full items-center gap-2 rounded-full bg-black/70 px-3 py-1.5 text-xs font-semibold text-white"
+          >
+            <span className="motion-safe:animate-pulse inline-block h-2 w-2 shrink-0 rounded-full bg-cyan-300" />
+            <span className="min-w-0 truncate">{caption}…</span>
           </div>
         )}
         <QueryBar onSubmit={(text) => void handlePhrase(text)} />

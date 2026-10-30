@@ -3,7 +3,12 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import { VoiceAssistant } from './voiceAssistant'
-import { buildHandshake, downsampleTo24k, encodeS16LE } from './realtimeTranscribe'
+import {
+  KEYWORDS,
+  buildHandshake,
+  downsampleTo24k,
+  encodeS16LE,
+} from './realtimeTranscribe'
 import { clearLogs, getLogs } from './logger'
 
 type Frame = string | ArrayBuffer
@@ -113,7 +118,7 @@ const EXPECTED_HANDSHAKE = {
   model: 'muse-voice-transcribe-1.0',
   mode: 'ENDPOINTING',
   languageBias: ['English'],
-  keywords: ['bolt', 'torque', 'hex', 'Torx', 'gasket', 'valve', 'bearing', 'fuse'],
+  keywords: [...KEYWORDS],
   emitAudioProgress: false,
 }
 
@@ -149,10 +154,19 @@ function mockMicrophone(granted: boolean): {
   return { tracks, getUserMedia }
 }
 
-async function startListening(callbacks?: { onPhrase?: Mock; onError?: Mock }): Promise<{
+async function startListening(callbacks?: {
+  onPhrase?: Mock
+  onError?: Mock
+  onInterim?: Mock
+  onSpeechStart?: Mock
+  onSpeechEnd?: Mock
+}): Promise<{
   assistant: VoiceAssistant
   onPhrase: Mock
   onError: Mock
+  onInterim: Mock
+  onSpeechStart: Mock
+  onSpeechEnd: Mock
   tracks: { stop: Mock }[]
   getUserMedia: Mock
 }> {
@@ -161,9 +175,12 @@ async function startListening(callbacks?: { onPhrase?: Mock; onError?: Mock }): 
   const { tracks, getUserMedia } = mockMicrophone(true)
   const onPhrase = callbacks?.onPhrase ?? vi.fn()
   const onError = callbacks?.onError ?? vi.fn()
-  const assistant = new VoiceAssistant({ onPhrase, onError })
+  const onInterim = callbacks?.onInterim ?? vi.fn()
+  const onSpeechStart = callbacks?.onSpeechStart ?? vi.fn()
+  const onSpeechEnd = callbacks?.onSpeechEnd ?? vi.fn()
+  const assistant = new VoiceAssistant({ onPhrase, onError, onInterim, onSpeechStart, onSpeechEnd })
   await assistant.start()
-  return { assistant, onPhrase, onError, tracks, getUserMedia }
+  return { assistant, onPhrase, onError, onInterim, onSpeechStart, onSpeechEnd, tracks, getUserMedia }
 }
 
 function latestSocket(): FakeWebSocket {
@@ -296,22 +313,31 @@ describe('transcription frames', () => {
     assistant.stop()
   })
 
-  it('ignores transcript partials', async () => {
+  it('forwards interim partials to onInterim without dispatching', async () => {
     const onPhrase = vi.fn()
-    const { assistant } = await startListening({ onPhrase })
+    const onInterim = vi.fn()
+    const { assistant } = await startListening({ onPhrase, onInterim })
     openAndAck(latestSocket())
     latestSocket().receiveText({ type: 'transcript', transcript: 'half', final: false })
-    latestSocket().receiveText({ type: 'transcript', transcript: 'half' })
+    latestSocket().receiveText({ type: 'transcript', transcript: '  half done ' })
+    latestSocket().receiveText({ type: 'transcript', transcript: '   ' })
+    expect(onInterim).toHaveBeenCalledWith('half')
+    expect(onInterim).toHaveBeenCalledWith('half done')
+    expect(onInterim).toHaveBeenCalledTimes(2)
     expect(onPhrase).not.toHaveBeenCalled()
     expect(assistant.isListening()).toBe(true)
     assistant.stop()
   })
 
-  it('debug-logs speechStart and speechEnd', async () => {
-    const { assistant } = await startListening()
+  it('fires speech boundary callbacks and keeps debug logs', async () => {
+    const onSpeechStart = vi.fn()
+    const onSpeechEnd = vi.fn()
+    const { assistant } = await startListening({ onSpeechStart, onSpeechEnd })
     openAndAck(latestSocket())
     latestSocket().receiveText({ type: 'speechStart' })
     latestSocket().receiveText({ type: 'speechEnd' })
+    expect(onSpeechStart).toHaveBeenCalledTimes(1)
+    expect(onSpeechEnd).toHaveBeenCalledTimes(1)
     const debug = getLogs().filter((e) => e.level === 'debug' && e.tag === 'voice')
     expect(debug.some((e) => e.message.includes('speechStart'))).toBe(true)
     expect(debug.some((e) => e.message.includes('speechEnd'))).toBe(true)

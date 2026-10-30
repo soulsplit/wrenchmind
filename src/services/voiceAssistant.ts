@@ -13,6 +13,12 @@ import {
 export interface VoiceAssistantCallbacks {
   onPhrase: (phrase: string) => void
   onError: (message: string) => void
+  /** Live partial transcript while the user is still speaking (captions). */
+  onInterim?: (transcript: string) => void
+  /** Fired when the model hears speech begin (barge-in, ack blip). */
+  onSpeechStart?: () => void
+  /** Fired when the model hears speech stop (turn endpoint ack). */
+  onSpeechEnd?: () => void
 }
 
 type AudioContextCtor = typeof AudioContext
@@ -317,12 +323,20 @@ export class VoiceAssistant {
         if (transcript) this.callbacks.onPhrase(transcript)
         break
       }
-      case 'transcript':
+      case 'transcript': {
         // Interim partials; endpointed text arrives as speechComplete.
+        // Forwarded for live captions and barge-in (never dispatched).
+        const partial = typeof msg['transcript'] === 'string' ? msg['transcript'].trim() : ''
+        if (partial) this.callbacks.onInterim?.(partial)
         break
+      }
       case 'speechStart':
+        logDebug('voice', String(msg['type']))
+        this.callbacks.onSpeechStart?.()
+        break
       case 'speechEnd':
         logDebug('voice', String(msg['type']))
+        this.callbacks.onSpeechEnd?.()
         break
       case 'error': {
         const detail = typeof msg['message'] === 'string' ? msg['message'] : 'unknown error'

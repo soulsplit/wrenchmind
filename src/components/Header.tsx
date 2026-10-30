@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Status } from '../types'
+import type { SpeechVoiceInfo } from '../services/speechOutput'
 import { APP_VERSION } from '../version'
 import { Dots, FLASHLIGHT, Icon, PAUSE_BARS } from './Icon'
 import StatusBar from './StatusBar'
@@ -15,6 +16,11 @@ interface HeaderProps {
   tracking: boolean
   voiceOn: boolean
   onVoiceToggle: (next: boolean) => void
+  /** Voices for the picker; loaded when voice mode turns on. */
+  voices: SpeechVoiceInfo[]
+  /** Pinned speech voice; null follows auto-pick. */
+  voiceName: string | null
+  onVoiceNameChange: (name: string | null) => void
   /** Actual facing from the stream's track settings; 'unknown' (desktop) renders CAMERA. */
   facing: 'environment' | 'user' | 'unknown'
   multiCamera: boolean
@@ -50,6 +56,9 @@ export default function Header({
   tracking,
   voiceOn,
   onVoiceToggle,
+  voices,
+  voiceName,
+  onVoiceNameChange,
   facing,
   multiCamera,
   onSwitchCamera,
@@ -172,6 +181,24 @@ export default function Header({
             }}
             label="Voice mode"
           />
+          <label className="flex min-h-[48px] w-full flex-col justify-center gap-1 rounded-lg bg-white/90 px-4 py-2 text-black">
+            <span className="text-xs font-bold uppercase tracking-wide text-black/60">
+              Speech voice
+            </span>
+            <select
+              aria-label="Speech voice"
+              value={voiceName ?? ''}
+              onChange={(event) => onVoiceNameChange(event.target.value || null)}
+              className="w-full bg-transparent text-base font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 focus-visible:ring-offset-2"
+            >
+              <option value="">Auto (recommended)</option>
+              {voices.map((voice) => (
+                <option key={`${voice.name}|${voice.lang}`} value={voice.name}>
+                  {voice.name}
+                </option>
+              ))}
+            </select>
+          </label>
           <QrShare
             onOpen={() => {
               setQrOpen(true)
