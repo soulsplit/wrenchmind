@@ -19,6 +19,7 @@ import {
   segmentImage,
 } from '../services/metaApi'
 import { parseSamStream } from '../services/samParser'
+import { decodePhotoFile } from '../services/photoUpload'
 import { fetchGuidance } from '../services/guidanceApi'
 import { searchGuides } from '../services/ifixitApi'
 import {
@@ -79,6 +80,10 @@ vi.mock('../services/samParser', async (importOriginal) => {
 
 vi.mock('../services/guidanceApi', () => ({
   fetchGuidance: vi.fn(),
+}))
+
+vi.mock('../services/photoUpload', () => ({
+  decodePhotoFile: vi.fn(),
 }))
 
 vi.mock('../services/speechOutput', () => ({
@@ -327,6 +332,7 @@ beforeEach(() => {
   vi.mocked(searchGuides).mockReset().mockResolvedValue([])
   vi.mocked(speakText).mockReset().mockResolvedValue(undefined)
   vi.mocked(cancelSpeech).mockReset()
+  vi.mocked(decodePhotoFile).mockReset()
   vi.mocked(isSpeaking).mockReset().mockReturnValue(false)
   vi.mocked(getAvailableVoices).mockReset().mockResolvedValue([])
   vi.mocked(getPreferredVoiceName).mockReset().mockReturnValue(null)
@@ -4075,6 +4081,49 @@ describe('Scanner freeze frame', () => {
       expect(
         getLogs().some((e) => e.message.includes('flashlight off (freeze stopped the camera)')),
       ).toBe(true)
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('freezes an uploaded photo like a camera still', async () => {
+    mockCamera(true)
+    const still = document.createElement('canvas')
+    still.width = 640
+    still.height = 480
+    vi.mocked(decodePhotoFile).mockResolvedValue(still)
+    const media = mockMediaControls()
+    try {
+      render(<Scanner />)
+      await screen.findByText('LIVE')
+      const file = new File(['bytes'], 'engine.jpg', { type: 'image/jpeg' })
+      fireEvent.change(screen.getByLabelText('Upload photo'), { target: { files: [file] } })
+      expect(vi.mocked(decodePhotoFile)).toHaveBeenCalledWith(file)
+      expect(await screen.findByAltText('Uploaded photo')).toBeInTheDocument()
+      expect(screen.getByText('FROZEN')).toBeInTheDocument()
+      expect(screen.queryByText('LIVE')).not.toBeInTheDocument()
+      // The uploaded still is tappable exactly like a camera freeze.
+      expect(screen.getByLabelText('Circle or tap to identify a part')).toBeInTheDocument()
+      expect(
+        getLogs().some((e) => e.message.includes('photo added — camera stopped')),
+      ).toBe(true)
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('keeps the live feed when a photo is unreadable', async () => {
+    mockCamera(true)
+    vi.mocked(decodePhotoFile).mockRejectedValue(new Error('Could not read that photo.'))
+    const media = mockMediaControls()
+    try {
+      render(<Scanner />)
+      await screen.findByText('LIVE')
+      const file = new File(['bytes'], 'engine.heic', { type: 'image/heic' })
+      fireEvent.change(screen.getByLabelText('Upload photo'), { target: { files: [file] } })
+      expect(await screen.findByRole('alert')).toHaveTextContent('Could not read that photo')
+      expect(screen.queryByAltText('Uploaded photo')).not.toBeInTheDocument()
+      expect(screen.getByText('LIVE')).toBeInTheDocument()
     } finally {
       media.restore()
     }

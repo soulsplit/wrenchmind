@@ -2,10 +2,12 @@ import { useState, type FormEvent } from 'react'
 
 interface QueryBarProps {
   onSubmit: (text: string) => void
+  /** A photo picked from the device; the host freezes it like a still. */
+  onPhotoSelect: (file: File) => void
 }
 
 /** Text fallback for the voice pipeline: noisy shops, unsupported browsers, testing. */
-export default function QueryBar({ onSubmit }: QueryBarProps) {
+export default function QueryBar({ onSubmit, onPhotoSelect }: QueryBarProps) {
   const [value, setValue] = useState('')
 
   const handleSubmit = (event: FormEvent) => {
@@ -22,6 +24,30 @@ export default function QueryBar({ onSubmit }: QueryBarProps) {
       className="flex items-center gap-2 w-full"
       aria-label="Text query"
     >
+      {/*
+        Photo upload: a (+) circle left of the input. The label opens the
+        system picker; the host decodes the file into a still that behaves
+        exactly like a frozen camera frame (tap/circle to identify).
+      */}
+      <label
+        className="min-h-[48px] min-w-[48px] shrink-0 rounded-full bg-white/10 text-white flex items-center justify-center active:scale-95 transition cursor-pointer focus-within:outline-none focus-within:ring-2 focus-within:ring-white/80"
+      >
+        <span aria-hidden="true" className="text-2xl font-bold leading-none">
+          +
+        </span>
+        <input
+          type="file"
+          accept="image/*"
+          aria-label="Upload photo"
+          className="sr-only"
+          onChange={(event) => {
+            const file = event.target.files?.[0]
+            // Reset so picking the same photo twice still fires.
+            event.target.value = ''
+            if (file) onPhotoSelect(file)
+          }}
+        />
+      </label>
       <input
         type="text"
         value={value}

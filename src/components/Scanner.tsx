@@ -33,6 +33,7 @@ import {
   type ZoomState,
 } from '../services/feedStage'
 import { parseSamStream, scaleRecordToVideo } from '../services/samParser'
+import { decodePhotoFile } from '../services/photoUpload'
 import {
   cancelSpeech,
   getAvailableVoices,
@@ -284,6 +285,8 @@ export default function Scanner() {
   /** Pixel source of truth while frozen; the video element carries no stream. */
   const stillRef = useRef<HTMLCanvasElement | null>(null)
   const [stillUrl, setStillUrl] = useState<string | null>(null)
+  /** Where the still came from: camera freeze or uploaded photo. */
+  const [stillKind, setStillKind] = useState<'camera' | 'upload' | null>(null)
   /** Bumped on unfreeze to re-acquire the camera via the camera effect. */
   const [restartKey, setRestartKey] = useState(0)
   const [hintIndex, setHintIndex] = useState(0)
@@ -596,6 +599,7 @@ export default function Scanner() {
           // never flashes black during restart.
           stillRef.current = null
           setStillUrl(null)
+          setStillKind(null)
         } catch {
           if (!cancelled) logWarn('camera', 'video autoplay was blocked')
         }
@@ -732,6 +736,62 @@ export default function Scanner() {
   }, [])
 
   /**
+   * Freeze onto a still canvas — from the live frame or an uploaded photo —
+   * then stop the camera. The still becomes the frame source, so tap,
+   * circle, identify, and segment all work exactly like a camera freeze.
+   * Torch is switched off at the hardware level first (see extinguishTorch).
+   */
+  const freezeWithStill = useCallback(
+    async (still: HTMLCanvasElement | null, source: 'camera' | 'upload') => {
+      if (still) {
+        stillRef.current = still
+        setStillUrl(still.toDataURL('image/jpeg', 0.92))
+      }
+      pauseRefresh()
+      if (torchOn) {
+        // Hardware first: stopping a track with an active torch
+        // constraint can leave the LED stuck on after the camera stops.
+        await extinguishTorch()
+        setTorchOn(false)
+        logInfo(
+          'camera',
+          source === 'upload'
+            ? 'flashlight off (photo mode stopped the camera)'
+            : 'flashlight off (freeze stopped the camera)',
+        )
+      }
+      stopTracks()
+      setStillKind(source)
+      setFrozen(true)
+      logInfo(
+        'camera',
+        source === 'upload'
+          ? 'photo added — camera stopped, circle or tap a part'
+          : 'frame frozen — camera stopped, circle or tap a part',
+      )
+    },
+    [pauseRefresh, stopTracks, torchOn, extinguishTorch],
+  )
+
+  /**
+   * Decode an uploaded photo and freeze onto it like a camera still.
+   * Failures surface as errors; the live feed is untouched.
+   */
+  const addPhoto = useCallback(
+    async (file: File) => {
+      try {
+        const still = await decodePhotoFile(file)
+        await freezeWithStill(still, 'upload')
+      } catch (e) {
+        const message = e instanceof Error ? e.message : 'Could not read that photo.'
+        logError('photo', message)
+        setError(message)
+      }
+    },
+    [freezeWithStill],
+  )
+
+  /**
    * Freeze-frame workbench switch. Freezing snapshots the current frame to
    * a still canvas, pauses the refresh timeout (masks stay painted), and
    * stops the camera tracks; resuming clears the trace and AR annotations,
@@ -745,25 +805,14 @@ export default function Scanner() {
         const video = videoRef.current
         const vw = video?.videoWidth ?? 0
         const vh = video?.videoHeight ?? 0
+        let still: HTMLCanvasElement | null = null
         if (video && vw > 0 && vh > 0) {
-          const still = document.createElement('canvas')
+          still = document.createElement('canvas')
           still.width = vw
           still.height = vh
           still.getContext('2d')?.drawImage(video, 0, 0, vw, vh)
-          stillRef.current = still
-          setStillUrl(still.toDataURL('image/jpeg', 0.92))
         }
-        pauseRefresh()
-        if (torchOn) {
-          // Hardware first: stopping a track with an active torch
-          // constraint can leave the LED stuck on after the camera stops.
-          await extinguishTorch()
-          setTorchOn(false)
-          logInfo('camera', 'flashlight off (freeze stopped the camera)')
-        }
-        stopTracks()
-        setFrozen(true)
-        logInfo('camera', 'frame frozen — camera stopped, circle or tap a part')
+        await freezeWithStill(still, 'camera')
         return
       }
       traceRef.current = null
@@ -778,10 +827,11 @@ export default function Scanner() {
       setTracking(false)
       draw(true)
       setFrozen(false)
+      setStillKind(null)
       setRestartKey((k) => k + 1)
       logInfo('camera', 'frame live — AR annotations cleared')
     },
-    [pauseRefresh, stopTracks, clearRefresh, draw, torchOn, extinguishTorch],
+    [freezeWithStill, clearRefresh, draw],
   )
 
   /**
@@ -1511,6 +1561,7 @@ export default function Scanner() {
     if (frozen) {
       stillRef.current = null
       setStillUrl(null)
+      setStillKind(null)
       setFrozen(false)
     }
     // The overlay belongs to the old scene: clear it before switching.
@@ -1706,7 +1757,7 @@ export default function Scanner() {
       {stillUrl && !cameraLive && (
         <img
           src={stillUrl}
-          alt="Frozen frame"
+          alt={stillKind === 'upload' ? 'Uploaded photo' : 'Frozen frame'}
           draggable={false}
           className={`absolute inset-0 w-full h-full object-cover${mirrored ? ' -scale-x-100' : ''}`}
         />
@@ -2015,7 +2066,10 @@ export default function Scanner() {
             <span className="min-w-0 truncate">{caption}…</span>
           </div>
         )}
-        <QueryBar onSubmit={(text) => void handlePhrase(text)} />
+        <QueryBar
+          onSubmit={(text) => void handlePhrase(text)}
+          onPhotoSelect={(file) => void addPhoto(file)}
+        />
       </div>
       </div>
       {isDesktop && (
