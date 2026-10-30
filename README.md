@@ -1,17 +1,14 @@
 # WrenchMind
 
-> They talk about your engine. WrenchMind points at it.
+> They talk about your engine. WrenchMind helps you to fix it.
 
 Built for the [Meta Global Hackathon](https://dev.meta.ai/events/global-hackathon).
-**Note to us: submit everything on November 3rd** (ahead of the event's final deadline).
 
 What it does:
 
-- Point the phone camera at an engine, ask a plain question ("show me the
-  blend door"), get an AR outline on the part plus a short spoken answer.
-- Each identified part gets a repair card: steps with cautions, specs, tools,
-  warnings, and manual/source links.
-- Hands-free voice loop with a typed query bar that runs the same pipeline.
+- Point the phone camera at an engine or piece of hardware and ask a plain question. You will get an augmented reality outline on the part and its name.
+- Each identified part gets a repair card: steps with cautions, specs, tools, warnings, and manual/source links if found.
+- Hands-free voice or chat style interaction.
 
 **Live demo:** https://soulsplit.github.io/wrenchmind/
 
@@ -23,15 +20,15 @@ npm ci
 npm run dev            # http://localhost:5173/wrenchmind/
 ```
 
-Phone testing: camera and mic need HTTPS or localhost, so plain LAN HTTP
-never prompts. Point a tunnel at the dev server:
+Point a tunnel at the dev server to expose it:
 
 ```sh
 cloudflared tunnel --url http://localhost:5173
 ```
 
 Open the printed `https://...trycloudflare.com/wrenchmind/` URL on the
-phone (dev accepts `*.trycloudflare.com` hosts). Or open that URL on the
+phone (dev accepts `*.trycloudflare.com` hosts by default; set
+`VITE_ALLOWED_HOSTS` to your exact tunnel hostname to narrow it). Or open that URL on the
 desktop too and scan the in-app QR code (header menu) with the phone.
 
 ## Run from GitHub
@@ -44,31 +41,22 @@ and enable Pages with the **GitHub Actions** source in repo settings.
 
 ## Features
 
-- Full-viewport camera feed with transparent AR canvas; front/back switcher
-  hides itself on single-camera devices, and a flashlight toggle appears
-  when the camera track reports torch support. Freeze frame stills the
-  feed for circle-to-search (drag to circle a part) and tap-to-identify
-  without re-segmentation. Identification retries a wide-context crop when
-  the tight crop is unnamed, and prefers a generic category over "unknown".
-  The feed negotiates up to 4K and zooms to 4x (pinch, mouse wheel)
-  on live and frozen frames; taps stay accurate while zoomed.
-- Color-coded overlays (cyan = component, yellow = connector, red =
-  fastener) with callout pills; plural queries ("all the bolts") isolate
-  every instance with numbered outlines. Overlays re-segment every 2 s so
-  they track moving subjects.
-- Voice mode toggle with continuous recognition via Meta Muse Voice
-  Transcribe (realtime socket, model-detected turn ends); "done", "back",
-  "repeat" step through the repair card hands-free. Once locked on,
-  follow-ups answer by voice without re-marking.
-- Repair guidance card: step n-of-m with Back / Next Step buttons, specs
-  (always flagged "verify against the manual"), tools, a warnings slot
-  that always renders, manual title, source links, and matching iFixit
-  repair guides. "Scan Another Part" resets for the next part.
-- One-tap HTML repair-report export (steps with progress and photos,
-  specs, warnings, sources, session log) and an in-app log with copy/download.
-- Header badges: LIVE / NO FEED, front/rear camera, tracking lock, and
-  status. Missing API key and camera/mic failures surface as plain-text
-  errors with fixes.
+- Full-viewport camera feed with transparent AR canvas
+- Front/back camera switcher
+- Flashlight toggle to bring light to dark places like under a car
+- Freeze frame holds the feed still so you can circle or tap parts at your own pace
+- Supports circle-to-search and tap-to-identify
+- Up to 4K and zoom to 4x
+- Color-coded overlays (cyan = component, yellow = connector, red = fastener) with callout pills
+- Overlays re-segment every 2 s so they track moving subjects
+- Voice mode toggle with continuous recognition via Meta Muse Voice Transcribe (realtime socket, model-detected turn ends); "done", "back",
+  "repeat" step through the repair card hands-free. Once locked on, follow-ups answer by voice without re-marking.
+- Repair guidance card: step n-of-m with Back / Next Step buttons, specs (always flagged "verify against the manual"), tools, a warnings slot
+  that always renders, manual title, source links, and matching iFixit repair guides. "Scan Another Part" resets for the next part.
+- One-tap HTML repair-report export (steps with progress and photos, specs, warnings, sources, session log) and an in-app log with copy/download.
+- Header badges: LIVE / NO FEED / FROZEN, front/rear camera, tracking lock,
+  status, rotating hint pill, and the app version. Missing API key and
+  camera/mic failures surface as plain-text errors with fixes.
 
 | Script            | Purpose                               |
 | ----------------- | ------------------------------------- |
