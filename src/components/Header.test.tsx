@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
 import Header from './Header'
+import { APP_VERSION } from '../version'
 
 function renderHeader(overrides: Partial<Parameters<typeof Header>[0]> = {}) {
   const props = {
@@ -48,6 +49,13 @@ describe('Header', () => {
     expect(screen.getByText('Listening')).toBeInTheDocument()
     expect(screen.getByText('LIVE')).toBeInTheDocument()
     expect(screen.getByText('REAR CAMERA')).toBeInTheDocument()
+  })
+
+  it('shows the app version in the top bar', () => {
+    renderHeader()
+    const badge = screen.getByTestId('app-version')
+    expect(badge).toHaveTextContent(`v${APP_VERSION}`)
+    expect(badge).toHaveAttribute('title', `Version ${APP_VERSION}`)
   })
 
   it('hides the hint pill while the overflow menu is open', () => {

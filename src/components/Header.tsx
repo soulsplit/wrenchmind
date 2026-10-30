@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Status } from '../types'
+import { APP_VERSION } from '../version'
 import { Dots, FLASHLIGHT, Icon, PAUSE_BARS } from './Icon'
 import StatusBar from './StatusBar'
 import Toggle from './Toggle'
@@ -108,6 +109,13 @@ export default function Header({
       >
         <span className="min-w-0 truncate text-xs font-bold tracking-wide text-white">
           WRENCHMIND
+        </span>
+        <span
+          className="shrink-0 rounded-full bg-white/10 px-2 py-0.5 text-xs font-semibold tracking-wide text-white/70"
+          title={`Version ${APP_VERSION}`}
+          data-testid="app-version"
+        >
+          v{APP_VERSION}
         </span>
         {(live || frozen) && (
           <button
