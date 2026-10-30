@@ -12,6 +12,20 @@ What it does:
 
 **Live demo:** https://soulsplit.github.io/wrenchmind/
 
+## Demo
+
+Ask a question, get an AR outline plus a repair card:
+
+![Live AR outline with repair steps](docs/demo-live-outline.png)
+
+The full flow, from question to guided steps:
+
+![Full demo flow: ask, outline, repair steps](https://github.com/soulsplit/wrenchmind/releases/download/v0.1.6/demo-full-flow.gif)
+
+Freeze the frame to circle parts at your own pace; typing runs the same pipeline as voice:
+
+<img src="docs/demo-frozen-frame.gif" width="300" alt="Frozen frame with circled part"> <img src="docs/demo-typed-query.gif" width="300" alt="Typed repair question">
+
 ## Built with Meta AI
 
 | Model | What it does in the app |
