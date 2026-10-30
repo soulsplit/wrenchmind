@@ -4094,12 +4094,15 @@ describe('Scanner freeze frame', () => {
     vi.mocked(decodePhotoFile).mockResolvedValue(still)
     const media = mockMediaControls()
     try {
-      render(<Scanner />)
+      const { container } = render(<Scanner />)
       await screen.findByText('LIVE')
       const file = new File(['bytes'], 'engine.jpg', { type: 'image/jpeg' })
       fireEvent.change(screen.getByLabelText('Upload photo'), { target: { files: [file] } })
       expect(vi.mocked(decodePhotoFile)).toHaveBeenCalledWith(file)
-      expect(await screen.findByAltText('Uploaded photo')).toBeInTheDocument()
+      const photo = await screen.findByAltText('Uploaded photo')
+      expect(photo).toHaveClass('object-contain')
+      // The overlay canvas letterboxes in lockstep so masks stay aligned.
+      expect(container.querySelector('canvas')).toHaveClass('object-contain')
       expect(screen.getByText('FROZEN')).toBeInTheDocument()
       expect(screen.queryByText('LIVE')).not.toBeInTheDocument()
       // The uploaded still is tappable exactly like a camera freeze.
@@ -4124,6 +4127,20 @@ describe('Scanner freeze frame', () => {
       expect(await screen.findByRole('alert')).toHaveTextContent('Could not read that photo')
       expect(screen.queryByAltText('Uploaded photo')).not.toBeInTheDocument()
       expect(screen.getByText('LIVE')).toBeInTheDocument()
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('keeps camera freezes full-bleed cover', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      expect(screen.getByAltText('Frozen frame')).toHaveClass('object-cover')
+      expect(container.querySelector('canvas')).toHaveClass('object-cover')
     } finally {
       media.restore()
     }
@@ -4606,6 +4623,38 @@ describe('tapToMedia', () => {
     expect(tap?.y).toBe(50)
   })
 
+  it('inverts the letterboxed fit of a landscape frame in a portrait view', () => {
+    // Contain: 640x480 in 300x400 scales by 0.46875 to 300x225, centered
+    // with 87.5px bars top and bottom. Center tap hits frame center.
+    const tap = tapToMedia(
+      150,
+      200,
+      { left: 0, top: 0, width: 300, height: 400 },
+      640,
+      480,
+      1,
+      false,
+      'contain',
+    )
+    expect(tap?.point).toEqual({ x: 320, y: 240, width: 640, height: 480 })
+    expect(tap?.x).toBe(50)
+    expect(tap?.y).toBe(50)
+  })
+
+  it('clamps letterbox-bar taps to the frame edge in contain mode', () => {
+    const tap = tapToMedia(
+      150,
+      40,
+      { left: 0, top: 0, width: 300, height: 400 },
+      640,
+      480,
+      1,
+      false,
+      'contain',
+    )
+    expect(tap?.point).toEqual({ x: 320, y: 0, width: 640, height: 480 })
+  })
+
   it('clamps out-of-frame taps into the media bounds', () => {
     expect(
       tapToMedia(-50, 1000, { left: 0, top: 0, width: 320, height: 240 }, 640, 480),
@@ -4769,6 +4818,16 @@ describe('stageBoxToMedia', () => {
     expect(stageBoxToMedia(40, 60, 120, 180, 320, 240, 640, 480, true)).toEqual({
       box: { x1: 400, y1: 120, x2: 560, y2: 360 },
       x: 25,
+      y: 50,
+    })
+  })
+
+  it('maps the letterboxed image area to the full frame in contain mode', () => {
+    // Contain: 640x480 in 300x400 shows 300x225 centered (87.5px bars).
+    // Looping exactly the image area resolves to the full frame.
+    expect(stageBoxToMedia(0, 87.5, 300, 312.5, 300, 400, 640, 480, false, 'contain')).toEqual({
+      box: { x1: 0, y1: 0, x2: 639, y2: 479 },
+      x: 50,
       y: 50,
     })
   })

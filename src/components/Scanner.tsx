@@ -30,6 +30,7 @@ import {
   tapToMedia,
   zoomAt,
   ZOOM_MIN,
+  type FitMode,
   type ZoomState,
 } from '../services/feedStage'
 import { parseSamStream, scaleRecordToVideo } from '../services/samParser'
@@ -287,6 +288,12 @@ export default function Scanner() {
   const [stillUrl, setStillUrl] = useState<string | null>(null)
   /** Where the still came from: camera freeze or uploaded photo. */
   const [stillKind, setStillKind] = useState<'camera' | 'upload' | null>(null)
+  /**
+   * Uploaded photos letterbox (contain) so an arbitrary aspect always fits
+   * the screen; live video and camera freezes stay full-bleed cover.
+   * Threaded into both rendering (object-fit) and tap/circle mapping.
+   */
+  const frameFit: FitMode = stillKind === 'upload' ? 'contain' : 'cover'
   /** Bumped on unfreeze to re-acquire the camera via the camera effect. */
   const [restartKey, setRestartKey] = useState(0)
   const [hintIndex, setHintIndex] = useState(0)
@@ -1201,6 +1208,7 @@ export default function Scanner() {
           vh,
           zoomRef.current.scale,
           mirroredRef.current,
+          frameFit,
         )
         if (!tap) throw new Error('No video frame')
         const img = captureVideoFrame(el)
@@ -1246,7 +1254,7 @@ export default function Scanner() {
         busyRef.current = false
       }
     },
-    [frozen, cameraLive, frameTarget, speakReply, presentOutline],
+    [frozen, cameraLive, frameTarget, frameFit, speakReply, presentOutline],
   )
 
   /**
@@ -1280,6 +1288,7 @@ export default function Scanner() {
           vw,
           vh,
           mirroredRef.current,
+          frameFit,
         )
         if (!region) throw new Error('No video frame')
         const img = captureVideoFrame(el)
@@ -1339,7 +1348,7 @@ export default function Scanner() {
         busyRef.current = false
       }
     },
-    [frozen, cameraLive, frameTarget, speakReply, presentOutline],
+    [frozen, cameraLive, frameTarget, frameFit, speakReply, presentOutline],
   )
 
   /** Long-press removal: drop the topmost outline containing the tap point. */
@@ -1356,6 +1365,7 @@ export default function Scanner() {
         vh,
         zoomRef.current.scale,
         mirroredRef.current,
+        frameFit,
       )
       if (!tap) return
       const { x: mx, y: my } = tap.point
@@ -1373,7 +1383,7 @@ export default function Scanner() {
       draw()
       logInfo('tap', 'outline removed (long-press)')
     },
-    [draw, frameTarget],
+    [draw, frameTarget, frameFit],
   )
 
   const cancelPress = useCallback(() => {
@@ -1759,17 +1769,17 @@ export default function Scanner() {
           src={stillUrl}
           alt={stillKind === 'upload' ? 'Uploaded photo' : 'Frozen frame'}
           draggable={false}
-          className={`absolute inset-0 w-full h-full object-cover${mirrored ? ' -scale-x-100' : ''}`}
+          className={`absolute inset-0 w-full h-full ${frameFit === 'contain' ? 'object-contain' : 'object-cover'}${mirrored ? ' -scale-x-100' : ''}`}
         />
       )}
       {/*
-        Same cover geometry as the video: the backing store matches the frame
-        aspect, so object-cover aligns frame-pixel masks with the feed.
+        Same fit geometry as the frame above: the backing store matches the
+        frame aspect, so the object-fit aligns frame-pixel masks with the feed.
       */}
       <canvas
         ref={canvasRef}
         aria-hidden="true"
-        className={`absolute inset-0 w-full h-full object-cover pointer-events-none${mirrored ? ' -scale-x-100' : ''}`}
+        className={`absolute inset-0 w-full h-full ${frameFit === 'contain' ? 'object-contain' : 'object-cover'} pointer-events-none${mirrored ? ' -scale-x-100' : ''}`}
       />
       {/*
         Tap layer (frozen or live camera): above the canvas, below the

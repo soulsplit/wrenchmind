@@ -161,7 +161,35 @@ export interface TapMedia {
 }
 
 /**
- * Invert object-cover geometry: map a client tap on the displayed element
+ * How the frame is fitted into the stage: live video and camera freezes use
+ * object-cover (full-bleed viewfinder), uploaded photos use object-contain
+ * (arbitrary aspect — the whole image must stay visible, letterboxed).
+ */
+export type FitMode = 'cover' | 'contain'
+
+/**
+ * Invert object-contain geometry: the frame scales to fit, letterboxing the
+ * leftover bars centered. Taps landing on the bars clamp to the frame edge.
+ */
+function containToMedia(
+  px: number,
+  py: number,
+  w: number,
+  h: number,
+  videoW: number,
+  videoH: number,
+): { x: number; y: number } {
+  const contain = Math.min(w / videoW, h / videoH)
+  const ox = (w - videoW * contain) / 2
+  const oy = (h - videoH * contain) / 2
+  return {
+    x: Math.min(videoW - 1, Math.max(0, Math.round((px - ox) / contain))),
+    y: Math.min(videoH - 1, Math.max(0, Math.round((py - oy) / contain))),
+  }
+}
+
+/**
+ * Invert the stage fit geometry: map a client tap on the displayed element
  * back to media pixels, plus the tap's 0-100 viewport percent for the
  * callout. Undefined when media or element dims are unknown.
  *
@@ -183,6 +211,7 @@ export function tapToMedia(
   videoH: number,
   stageScale = 1,
   mirrored = false,
+  fit: FitMode = 'cover',
 ): TapMedia | undefined {
   if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return undefined
   if (!Number.isFinite(videoW) || !Number.isFinite(videoH) || videoW <= 0 || videoH <= 0) {
@@ -197,7 +226,8 @@ export function tapToMedia(
   const h = rect.height / stageScale
   const px = (clientX - rect.left) / stageScale
   const py = (clientY - rect.top) / stageScale
-  const media = coverToMedia(mirrored ? w - px : px, py, w, h, videoW, videoH)
+  const toMedia = fit === 'contain' ? containToMedia : coverToMedia
+  const media = toMedia(mirrored ? w - px : px, py, w, h, videoW, videoH)
   return {
     point: { ...media, width: videoW, height: videoH },
     x: clampPct(((clientX - rect.left) / rect.width) * 100),
@@ -236,7 +266,7 @@ export interface MediaRegion {
 
 /**
  * Map a circle-trace bounding box (untransformed stage coords) to media
- * pixels. Corners map independently through the cover inverse, so the box
+ * pixels. Corners map independently through the fit inverse, so the box
  * stays correct under zoom and pan. Undefined when dims are unknown.
  * Mirrored stages flip both corners against the stage width first; the
  * min/max ordering below keeps the box valid either way.
@@ -251,6 +281,7 @@ export function stageBoxToMedia(
   videoW: number,
   videoH: number,
   mirrored = false,
+  fit: FitMode = 'cover',
 ): MediaRegion | undefined {
   if (![ax, ay, bx, by].every(Number.isFinite)) return undefined
   if (!Number.isFinite(stageW) || !Number.isFinite(stageH) || stageW <= 0 || stageH <= 0) {
@@ -259,8 +290,9 @@ export function stageBoxToMedia(
   if (!Number.isFinite(videoW) || !Number.isFinite(videoH) || videoW <= 0 || videoH <= 0) {
     return undefined
   }
-  const c1 = coverToMedia(mirrored ? stageW - ax : ax, ay, stageW, stageH, videoW, videoH)
-  const c2 = coverToMedia(mirrored ? stageW - bx : bx, by, stageW, stageH, videoW, videoH)
+  const toMedia = fit === 'contain' ? containToMedia : coverToMedia
+  const c1 = toMedia(mirrored ? stageW - ax : ax, ay, stageW, stageH, videoW, videoH)
+  const c2 = toMedia(mirrored ? stageW - bx : bx, by, stageW, stageH, videoW, videoH)
   return {
     box: {
       x1: Math.min(c1.x, c2.x),
