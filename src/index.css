@@ -72,3 +72,14 @@ html, body, #root { height: 100%; margin: 0; overflow: hidden; }
     @apply bg-hud-ink text-white font-sans antialiased;
   }
 }
+
+/*
+ * Fallback for engines without dynamic viewport units (Safari < 15.4,
+ * Chrome < 108): map the dynamic root height to the static one so the
+ * fullscreen layout survives. Engines with dvh support skip this block.
+ */
+@supports not (height: 100dvh) {
+  .h-dvh {
+    height: 100vh;
+  }
+}

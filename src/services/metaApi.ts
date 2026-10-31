@@ -37,6 +37,35 @@ function requireKey(): string {
 }
 
 /**
+ * Assistant content JSON from a chat-completions response. A non-JSON body,
+ * a non-object envelope, or non-JSON content throws a propagated API error
+ * — never a raw TypeError/SyntaxError — so callers see one error shape.
+ * Missing content in a well-formed envelope still falls back to '{}'
+ * (defaults downstream).
+ */
+async function readChatJson(res: Response): Promise<unknown> {
+  let data: unknown
+  try {
+    data = await res.json()
+  } catch {
+    logError('api', 'muse-spark response was not JSON')
+    throw new Error('Muse Spark invalid response')
+  }
+  if (typeof data !== 'object' || data === null) {
+    logError('api', 'muse-spark response was not an object')
+    throw new Error('Muse Spark invalid response')
+  }
+  const content = (data as { choices?: Array<{ message?: { content?: unknown } }> }).choices?.[0]
+    ?.message?.content
+  try {
+    return JSON.parse(typeof content === 'string' ? content : '{}') as unknown
+  } catch {
+    logError('api', 'muse-spark message content was not JSON')
+    throw new Error('Muse Spark invalid response')
+  }
+}
+
+/**
  * Longest capture side sent to the APIs. The feed negotiates up to 4K for
  * the zoomable display, but reason/segment/label calls need far less — cap
  * here so a 3-frame burst doesn't upload ~10MB per query on mobile.
@@ -248,9 +277,7 @@ export async function reasonSpatial(
     logError('api', `muse-spark request failed: HTTP ${res.status}${suffix}`)
     throw new Error(`Muse Spark ${res.status}${suffix}`)
   }
-  const data = await res.json()
-  const text = data.choices?.[0]?.message?.content ?? '{}'
-  const parsed = JSON.parse(text) as Partial<SpatialResult>
+  const parsed = (await readChatJson(res)) as Partial<SpatialResult>
   return {
     target_label: typeof parsed.target_label === 'string' ? parsed.target_label : '',
     approx_x: clampModelPct(parsed.approx_x),
@@ -308,9 +335,7 @@ export async function extractLabelText(image: string): Promise<string[]> {
     logError('api', `muse-spark request failed: HTTP ${res.status}${suffix}`)
     throw new Error(`Muse Spark ${res.status}${suffix}`)
   }
-  const data = await res.json()
-  const text = data.choices?.[0]?.message?.content ?? '{}'
-  const parsed = JSON.parse(text) as { findings?: unknown }
+  const parsed = (await readChatJson(res)) as { findings?: unknown }
   if (!Array.isArray(parsed.findings)) return []
   return parsed.findings
     .filter((entry): entry is string => typeof entry === 'string')
@@ -365,9 +390,7 @@ export async function identifyComponent(image: string): Promise<string> {
     logError('api', `muse-spark request failed: HTTP ${res.status}${suffix}`)
     throw new Error(`Muse Spark ${res.status}${suffix}`)
   }
-  const data = await res.json()
-  const text = data.choices?.[0]?.message?.content ?? '{}'
-  const parsed = JSON.parse(text) as { label?: unknown }
+  const parsed = (await readChatJson(res)) as { label?: unknown }
   if (typeof parsed.label !== 'string') return ''
   return parsed.label.trim().slice(0, MAX_IDENTIFY_LABEL)
 }
@@ -551,13 +574,29 @@ export async function* segmentImage(
       /* ignore malformed stream chunks */
     }
   }
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() ?? ''
-    for (const line of lines) yield* ingest(line)
+  // Early close (final result seen, parse error, caller gone) runs this
+  // finally via return(), so the reader is always released or cancelled.
+  let done = false
+  try {
+    while (true) {
+      const chunk = await reader.read()
+      if (chunk.done) {
+        done = true
+        break
+      }
+      buffer += decoder.decode(chunk.value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) yield* ingest(line)
+    }
+    if (buffer) yield* ingest(buffer)
+  } finally {
+    if (!done) {
+      try {
+        await reader.cancel()
+      } catch {
+        /* body already torn down */
+      }
+    }
   }
-  if (buffer) yield* ingest(buffer)
 }

@@ -7,8 +7,11 @@
 /** Longest side of an uploaded-photo still; matches the API capture cap. */
 export const UPLOAD_MAX_SIDE = 1920
 
+/** Largest file decoded; bigger files are rejected before decode (self-DoS). */
+export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+
 /** Decode via an <img> element where createImageBitmap is unavailable. */
-function decodeViaElement(file: File): Promise<{ width: number; height: number }> {
+function decodeViaElement(file: File): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file)
     const img = new Image()
@@ -33,6 +36,9 @@ export async function decodePhotoFile(
   file: File,
   maxSide: number = UPLOAD_MAX_SIDE,
 ): Promise<HTMLCanvasElement> {
+  if (file.size > MAX_UPLOAD_BYTES) {
+    throw new Error('Could not read that photo — try a JPEG or PNG.')
+  }
   let source: { width: number; height: number; close?: () => void }
   try {
     if (typeof createImageBitmap === 'function') {

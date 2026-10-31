@@ -3,15 +3,13 @@ on:
   push:
     branches: [main]
   pull_request:
-permissions:
-  contents: read
-  pages: write
-  id-token: write
 concurrency:
   group: pages
   cancel-in-progress: true
 jobs:
   validate:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,6 +31,10 @@ jobs:
   deploy:
     needs: validate
     if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read # checkout
+      pages: write
+      id-token: write
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -47,8 +49,10 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Check deploy secret
+        env:
+          VITE_META_MODEL_API_KEY: ${{ secrets.VITE_META_MODEL_API_KEY }}
         run: |
-          if [ -z "${{ secrets.VITE_META_MODEL_API_KEY }}" ]; then
+          if [ -z "$VITE_META_MODEL_API_KEY" ]; then
             echo "::error::VITE_META_MODEL_API_KEY secret is not set. Add it at Settings → Secrets and variables → Actions, then re-run."
             exit 1
           fi
@@ -63,6 +67,7 @@ jobs:
   smoke:
     needs: deploy
     if: github.ref == 'refs/heads/main'
+    permissions: {}
     runs-on: ubuntu-latest
     steps:
       - run: curl -sfL --retry 5 --retry-delay 10 "${{ needs.deploy.outputs.page_url }}" | grep -q '<div id="root">'

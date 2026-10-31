@@ -180,6 +180,14 @@ describe('HudCard', () => {
     expect(screen.queryByText('MID-DRIVE DRIVE BELT')).not.toBeInTheDocument()
   })
 
+  it('announces loading with real text, not just a label', () => {
+    renderCard(null, { pending: true })
+    // Screen readers announce live-region text; the label alone names it.
+    const status = screen.getByRole('status', { name: 'Loading guidance' })
+    expect(status).toHaveTextContent('Loading guidance')
+    expect(status.querySelector('.sr-only')).toHaveTextContent('Loading guidance')
+  })
+
   it('renders nothing when idle without guidance', () => {
     const { container } = render(
       <HudCard

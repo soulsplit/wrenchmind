@@ -79,6 +79,147 @@ describe('fetchWithTimeout', () => {
       vi.useRealTimers()
     }
   })
+
+  it('trips the absolute timeout when the body never resolves', async () => {
+    vi.useFakeTimers()
+    try {
+      const hanging = (): Promise<never> => new Promise<never>(() => {})
+      vi.stubGlobal(
+        'fetch',
+        fetchMock.mockResolvedValue({
+          ok: true,
+          status: 200,
+          text: hanging,
+          body: {
+            getReader: () => ({ read: hanging, cancel: vi.fn(async () => {}) }),
+          },
+        } as unknown as Response),
+      )
+      const res = await fetchWithTimeout(
+        'https://example.com/stalled',
+        {},
+        { timeoutMs: 3000, tag: 'api', label: 'stalled' },
+      )
+      expect(res.ok).toBe(true)
+      expect(getLogs().some((e) => e.message.includes('timed out'))).toBe(false)
+      await vi.advanceTimersByTimeAsync(3001)
+      expect(
+        getLogs().some((e) => e.message.includes('stalled timed out after 3000ms')),
+      ).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('clears the deadline once a buffered or streamed body settles', async () => {
+    vi.useFakeTimers()
+    try {
+      // Buffered read completion settles.
+      vi.stubGlobal(
+        'fetch',
+        fetchMock.mockResolvedValue({
+          ok: true,
+          status: 200,
+          text: async () => 'done',
+          body: { getReader: () => ({ read: async () => ({ done: true }), cancel: vi.fn() }) },
+        } as unknown as Response),
+      )
+      const buffered = await fetchWithTimeout(
+        'https://example.com/b',
+        {},
+        { timeoutMs: 3000, tag: 'api', label: 'buffered' },
+      )
+      await buffered.text()
+      await vi.advanceTimersByTimeAsync(5000)
+      expect(getLogs().some((e) => e.message.includes('timed out'))).toBe(false)
+
+      // Streamed read-to-done settles.
+      vi.stubGlobal(
+        'fetch',
+        fetchMock.mockResolvedValue({
+          ok: true,
+          status: 200,
+          body: {
+            getReader: () => ({
+              read: async () => ({ done: true, value: undefined }),
+              cancel: vi.fn(async () => {}),
+            }),
+          },
+        } as unknown as Response),
+      )
+      const streamed = await fetchWithTimeout(
+        'https://example.com/s',
+        {},
+        { timeoutMs: 3000, tag: 'api', label: 'stream' },
+      )
+      const stream = streamed.body as unknown as {
+        getReader: () => { read: () => Promise<{ done: boolean }> }
+      }
+      await stream.getReader().read()
+      await vi.advanceTimersByTimeAsync(5000)
+      expect(getLogs().some((e) => e.message.includes('timed out'))).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('settles the deadline when a streamed read fails or is cancelled', async () => {
+    vi.useFakeTimers()
+    try {
+      // A failed read rethrows and still settles.
+      vi.stubGlobal(
+        'fetch',
+        fetchMock.mockResolvedValue({
+          ok: true,
+          status: 200,
+          body: {
+            getReader: () => ({
+              read: async () => {
+                throw new Error('torn down')
+              },
+              cancel: vi.fn(async () => {}),
+            }),
+          },
+        } as unknown as Response),
+      )
+      const failed = await fetchWithTimeout(
+        'https://example.com/e',
+        {},
+        { timeoutMs: 3000, tag: 'api', label: 'failing' },
+      )
+      const failingStream = failed.body as unknown as {
+        getReader: () => { read: () => Promise<{ done: boolean }> }
+      }
+      await expect(failingStream.getReader().read()).rejects.toThrow('torn down')
+      await vi.advanceTimersByTimeAsync(5000)
+      expect(getLogs().some((e) => e.message.includes('timed out'))).toBe(false)
+
+      // Cancelling the reader settles too.
+      const cancel = vi.fn(async () => {})
+      vi.stubGlobal(
+        'fetch',
+        fetchMock.mockResolvedValue({
+          ok: true,
+          status: 200,
+          body: { getReader: () => ({ read: vi.fn(), cancel }) },
+        } as unknown as Response),
+      )
+      const cancelled = await fetchWithTimeout(
+        'https://example.com/c',
+        {},
+        { timeoutMs: 3000, tag: 'api', label: 'cancelled' },
+      )
+      const cancelledStream = cancelled.body as unknown as {
+        getReader: () => { cancel: () => Promise<void> }
+      }
+      await cancelledStream.getReader().cancel()
+      expect(cancel).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(5000)
+      expect(getLogs().some((e) => e.message.includes('timed out'))).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })
 
 describe('errorDetail', () => {
@@ -121,6 +262,16 @@ describe('isRecord', () => {
     expect(isRecord('x')).toBe(false)
     expect(isRecord(42)).toBe(false)
     expect(isRecord(true)).toBe(false)
+  })
+
+
+  it('rejects arrays and functions: records are plain objects only', () => {
+    // Tightened contract: typeof-object alone is not enough, since arrays
+    // would otherwise pass field access meant for JSON objects.
+    expect(isRecord([])).toBe(false)
+    expect(isRecord([1, 2])).toBe(false)
+    expect(isRecord([{ a: 1 }])).toBe(false)
+    expect(isRecord(() => {})).toBe(false)
   })
 })
 

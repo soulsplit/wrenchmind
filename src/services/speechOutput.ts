@@ -173,6 +173,26 @@ interface SpeechTask {
   index: number
   voice: SpeechSynthesisVoice | null
   resolve: () => void
+  /** Bumped per chunk so late events from a cancelled utterance are ignored. */
+  utteranceSeq: number
+  /** Per-chunk watchdog forcing a stuck utterance to settle. */
+  watchdog: number | null
+}
+
+/** Worst-case ms per spoken char (slow voice + slack), scaled by rate. */
+const WATCHDOG_MS_PER_CHAR = 200
+/** Floor so short chunks still outlast synth startup latency. */
+const WATCHDOG_MIN_MS = 8000
+/** Ceiling so a wedged synth cannot stall the queue indefinitely. */
+const WATCHDOG_MAX_MS = 120000
+
+/** Generous per-chunk deadline: estimated speech time plus wide slack. */
+function chunkWatchdogMs(text: string, rate: number): number {
+  const paced = Math.min(Math.max(rate, 0.25), 4)
+  return Math.min(
+    WATCHDOG_MAX_MS,
+    Math.max(WATCHDOG_MIN_MS, (text.length * WATCHDOG_MS_PER_CHAR) / paced),
+  )
 }
 
 /**
@@ -235,7 +255,14 @@ export class SpeechService {
     // Task exists synchronously so isSpeaking()/cancelSpeech() are truthful
     // while voices resolve; utterances start once the voice is known.
     await new Promise<void>((resolve) => {
-      const task: SpeechTask = { chunks, index: 0, voice: null, resolve }
+      const task: SpeechTask = {
+        chunks,
+        index: 0,
+        voice: null,
+        resolve,
+        utteranceSeq: 0,
+        watchdog: null,
+      }
       this.task = task
       void this.resolveVoice().then(
         (voice) => {
@@ -264,6 +291,7 @@ export class SpeechService {
     this.seq += 1
     const task = this.task
     this.task = null
+    if (task) this.clearWatchdog(task)
     getSynth()?.cancel()
     task?.resolve()
   }
@@ -294,6 +322,7 @@ export class SpeechService {
           resolve(synth.getVoices())
         }, this.voiceTimeoutMs)
         synth.onvoiceschanged = (event) => {
+          synth.onvoiceschanged = prev
           if (typeof prev === 'function') prev.call(synth, event)
           window.clearTimeout(timer)
           resolve(synth.getVoices())
@@ -315,6 +344,7 @@ export class SpeechService {
   private speakNext(task: SpeechTask): void {
     const synth = getSynth()
     if (this.task !== task || !synth) return
+    this.clearWatchdog(task)
     const text = task.chunks[task.index]
     if (text === undefined) {
       this.task = null
@@ -322,19 +352,45 @@ export class SpeechService {
       return
     }
     task.index += 1
+    task.utteranceSeq += 1
+    const utteranceSeq = task.utteranceSeq
     const utterance = new SpeechSynthesisUtterance(text)
     utterance.rate = this.rate
     utterance.pitch = this.pitch
     if (task.voice) utterance.voice = task.voice
+    // Stale when preempted/cancelled or when the watchdog already moved on.
+    const stale = (): boolean => this.task !== task || task.utteranceSeq !== utteranceSeq
     utterance.onend = () => {
-      if (this.task === task) this.speakNext(task)
+      if (!stale()) this.speakNext(task)
     }
     utterance.onerror = (event: Event) => {
+      if (stale()) return
       const error = (event as { error?: unknown }).error
       logWarn('speech', `chunk failed (${String(error)}); continuing`)
-      if (this.task === task) this.speakNext(task)
+      this.speakNext(task)
     }
     synth.speak(utterance)
+    // Watchdog: speechSynthesis is known to drop end/error events (pipeline
+    // pauses, background tabs); force-advance the stuck chunk so the task
+    // always settles instead of wedging isSpeaking() forever.
+    task.watchdog = window.setTimeout(() => {
+      task.watchdog = null
+      if (stale()) return
+      logWarn('speech', 'utterance watchdog fired; advancing to the next chunk')
+      try {
+        synth.cancel()
+      } catch {
+        /* synth already gone */
+      }
+      this.speakNext(task)
+    }, chunkWatchdogMs(text, this.rate))
+  }
+
+  private clearWatchdog(task: SpeechTask): void {
+    if (task.watchdog !== null) {
+      window.clearTimeout(task.watchdog)
+      task.watchdog = null
+    }
   }
 }
 
@@ -371,16 +427,33 @@ export function setPreferredVoiceName(name: string | null): void {
   shared.setPreferredVoiceName(name)
 }
 
+/** Lazily-created blip context, reused across blips (browsers cap contexts). */
+let blipCtx: AudioContext | null = null
+
+function getBlipContext(): AudioContext | null {
+  const w = window as unknown as Record<string, unknown>
+  const Ctor = w['AudioContext'] ?? w['webkitAudioContext']
+  if (typeof Ctor !== 'function') return null
+  const CtorFn = Ctor as typeof AudioContext
+  if (!blipCtx || blipCtx.state === 'closed' || !(blipCtx instanceof CtorFn)) {
+    try {
+      blipCtx = new CtorFn()
+    } catch {
+      blipCtx = null
+      return null
+    }
+  }
+  return blipCtx
+}
+
 /**
  * Short acknowledgement blip on turn endpoint ("got it" feel). Best-effort:
  * silent no-op without AudioContext or on any failure; never throws.
  */
 export function playAckBlip(): void {
   try {
-    const w = window as unknown as Record<string, unknown>
-    const Ctor = w['AudioContext'] ?? w['webkitAudioContext']
-    if (typeof Ctor !== 'function') return
-    const ctx = new (Ctor as typeof AudioContext)()
+    const ctx = getBlipContext()
+    if (!ctx) return
     void ctx.resume?.().catch(() => undefined)
     const osc = ctx.createOscillator()
     const gain = ctx.createGain()
@@ -393,7 +466,7 @@ export function playAckBlip(): void {
     gain.connect(ctx.destination)
     osc.start()
     osc.stop(ctx.currentTime + 0.13)
-    osc.onended = () => void ctx.close().catch(() => undefined)
+    // The shared context stays open for the next blip.
   } catch {
     /* audio unavailable: stay silent */
   }

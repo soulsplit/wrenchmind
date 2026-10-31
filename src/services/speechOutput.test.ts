@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   SpeechService,
   normalizeForSpeech,
+  playAckBlip,
   splitSpeechChunks,
 } from './speechOutput'
 import { clearLogs, getLogs } from './logger'
@@ -204,6 +205,79 @@ describe('SpeechService', () => {
     await done
   })
 
+  it('settles a stuck utterance via the per-chunk watchdog', async () => {
+    vi.useFakeTimers()
+    try {
+      installSynth([new FakeVoice('V', 'en-US')])
+      const service = new SpeechService()
+      const done = service.speakText('Stuck speech here.')
+      await vi.advanceTimersByTimeAsync(1)
+      expect(synth.spoken).toHaveLength(1)
+      expect(service.isSpeaking()).toBe(true)
+      // No onend ever arrives; the watchdog force-settles the chunk.
+      await vi.advanceTimersByTimeAsync(30000)
+      expect(service.isSpeaking()).toBe(false)
+      await done
+      expect(synth.cancels).toBeGreaterThanOrEqual(1)
+      expect(getLogs().some((e) => e.level === 'warn' && /watchdog/.test(e.message))).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('advances past a stuck chunk instead of hanging the queue', async () => {
+    vi.useFakeTimers()
+    try {
+      installSynth([new FakeVoice('V', 'en-US')])
+      const service = new SpeechService()
+      const done = service.speakText(`${seg('a')} ${seg('b')}`)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(synth.spoken).toHaveLength(1)
+      await vi.advanceTimersByTimeAsync(60000)
+      expect(synth.spoken).toHaveLength(2)
+      synth.endLast()
+      await done
+      expect(service.isSpeaking()).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('restores the previous voiceschanged handler after resolving', async () => {
+    installSynth([])
+    const prev = vi.fn()
+    synth.onvoiceschanged = prev
+    const service = new SpeechService()
+    const done = service.speakText('Hi.')
+    await flush()
+    const late = new FakeVoice('Late Voice', 'en-US')
+    synth.voices = [late]
+    synth.onvoiceschanged?.()
+    await flush()
+    expect(prev).toHaveBeenCalledTimes(1)
+    expect(synth.onvoiceschanged).toBe(prev)
+    synth.endLast()
+    await done
+  })
+
+  it('restores the previous voiceschanged handler after the voice timeout', async () => {
+    vi.useFakeTimers()
+    try {
+      installSynth([])
+      const prev = vi.fn()
+      synth.onvoiceschanged = prev
+      const service = new SpeechService({ voiceTimeoutMs: 500 })
+      const done = service.speakText('Hi.')
+      await vi.advanceTimersByTimeAsync(600)
+      expect(synth.onvoiceschanged).toBe(prev)
+      expect(prev).not.toHaveBeenCalled()
+      synth.endLast()
+      await done
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('continues past a failed chunk', async () => {
     installSynth([new FakeVoice('V', 'en-US')])
     const service = new SpeechService()
@@ -347,5 +421,94 @@ describe('SpeechService voice selection', () => {
     expect(synth.spoken[0].text).toBe('Fit the M six bolt.')
     synth.endLast()
     await done
+  })
+})
+
+describe('playAckBlip', () => {
+  class FakeBlipContext {
+    static instances = 0
+    state = 'running'
+    currentTime = 0
+    destination = {}
+    resume = vi.fn(async () => {})
+    createOscillator = vi.fn(() => ({
+      type: 'sine' as OscillatorType,
+      frequency: { value: 0 },
+      connect: vi.fn(),
+      start: vi.fn(),
+      stop: vi.fn(),
+    }))
+    createGain = vi.fn(() => ({
+      gain: {
+        setValueAtTime: vi.fn(),
+        exponentialRampToValueAtTime: vi.fn(),
+      },
+      connect: vi.fn(),
+    }))
+
+    constructor() {
+      FakeBlipContext.instances += 1
+    }
+  }
+
+  afterEach(() => {
+    const w = window as unknown as Record<string, unknown>
+    delete w['AudioContext']
+    delete w['webkitAudioContext']
+  })
+
+  it('reuses one lazily-created AudioContext across blips', () => {
+    const w = window as unknown as Record<string, unknown>
+    w['AudioContext'] = FakeBlipContext
+    FakeBlipContext.instances = 0
+    playAckBlip()
+    playAckBlip()
+    expect(FakeBlipContext.instances).toBe(1)
+  })
+
+  it('stays silent without an AudioContext', () => {
+    expect(() => playAckBlip()).not.toThrow()
+  })
+
+  it('replaces a closed AudioContext on the next blip', () => {
+    const w = window as unknown as Record<string, unknown>
+    const created: FakeBlipContext[] = []
+    class TrackingContext extends FakeBlipContext {
+      constructor() {
+        super()
+        created.push(this)
+      }
+    }
+    w['AudioContext'] = TrackingContext
+    playAckBlip()
+    expect(created).toHaveLength(1)
+    created[0].state = 'closed'
+    playAckBlip()
+    expect(created).toHaveLength(2)
+  })
+
+  it('stays silent when the AudioContext constructor throws', () => {
+    const w = window as unknown as Record<string, unknown>
+    w['AudioContext'] = class ThrowingContext extends FakeBlipContext {
+      constructor() {
+        super()
+        throw new Error('no audio')
+      }
+    }
+    expect(() => playAckBlip()).not.toThrow()
+  })
+
+  it('falls back to webkitAudioContext when AudioContext is absent', () => {
+    const w = window as unknown as Record<string, unknown>
+    delete w['AudioContext']
+    let created = 0
+    w['webkitAudioContext'] = class WebKitContext extends FakeBlipContext {
+      constructor() {
+        super()
+        created += 1
+      }
+    }
+    playAckBlip()
+    expect(created).toBe(1)
   })
 })

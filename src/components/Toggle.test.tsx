@@ -31,4 +31,16 @@ describe('Toggle', () => {
     render(<Toggle checked={true} onChange={() => undefined} label="Custom" />)
     expect(screen.getByRole('switch', { name: 'Custom' })).toHaveTextContent('Disable Custom')
   })
+
+  it('uses the high-contrast confirm fill when on', () => {
+    render(<Toggle checked={true} onChange={() => undefined} />)
+    const toggle = screen.getByRole('switch')
+    expect(toggle).toHaveClass('bg-confirm-deep', 'text-white')
+    expect(toggle.className).not.toContain('bg-green-500')
+  })
+
+  it('gates press scaling behind motion-safe', () => {
+    render(<Toggle checked={false} onChange={() => undefined} />)
+    expect(screen.getByRole('switch').className).toContain('motion-safe:active:scale-95')
+  })
 })

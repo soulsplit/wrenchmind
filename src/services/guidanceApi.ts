@@ -176,7 +176,13 @@ function parseJsonText(text: string): unknown {
     return JSON.parse(text) as unknown
   } catch {
     const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/)
-    if (fenced?.[1]) return JSON.parse(fenced[1].trim()) as unknown
+    if (fenced?.[1]) {
+      try {
+        return JSON.parse(fenced[1].trim()) as unknown
+      } catch {
+        // Fall through to the labeled error below, not a raw SyntaxError.
+      }
+    }
     throw new Error('Guidance response was not valid JSON')
   }
 }
@@ -253,14 +259,19 @@ function validateGuidance(
 }
 
 /**
- * Session cache of validated guidance. Keyed by label+phrase: the label
- * alone is unsafe ('torque for belt' vs 'replace belt' need different
- * answers). Failures are never cached.
+ * Session cache of validated guidance. Keyed by label+phrase+context: the
+ * label alone is unsafe ('torque for belt' vs 'replace belt' need different
+ * answers), and the context carries assistant memory that changes the
+ * answer. Failures are never cached.
  */
 const guidanceCache = new Map<string, GuidanceResult>()
 
-function cacheKey(label: string, phrase: string): string {
-  return `${label.trim().toLowerCase()}\n${phrase.trim().toLowerCase()}`
+function cacheKey(label: string, phrase: string, context: string): string {
+  return (
+    `${label.trim().toLowerCase()}\n` +
+    `${phrase.trim().toLowerCase()}\n` +
+    `${context.trim().toLowerCase()}`
+  )
 }
 
 /** Clear the session guidance cache (tests). */
@@ -280,7 +291,7 @@ export async function fetchGuidance(
   context: string,
 ): Promise<GuidanceResult> {
   const apiKey = requireKey()
-  const cacheId = cacheKey(label, phrase)
+  const cacheId = cacheKey(label, phrase, context)
   const cached = guidanceCache.get(cacheId)
   if (cached) {
     logDebug('guidance', `cache hit for "${label.trim()}"`)

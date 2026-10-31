@@ -1,9 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import { act, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { StrictMode } from 'react'
 import Scanner from './Scanner'
+import { fetchWithTimeout } from '../services/http'
 import {
+  approxToStage,
+  calloutStyle,
   clampZoomPan,
   identifyWithContext,
+  overlayUiScale,
   pinchZoom,
   stageBoxToMedia,
   tapToMedia,
@@ -97,9 +102,13 @@ vi.mock('../services/speechOutput', () => ({
   playAckBlip: vi.fn(),
 }))
 
-vi.mock('../hooks/useKeyboardShift', () => ({
-  useKeyboardShift: vi.fn(() => 0),
-}))
+vi.mock('../hooks/useKeyboardShift', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../hooks/useKeyboardShift')>()
+  return {
+    ...actual,
+    useKeyboardShift: vi.fn(() => 0),
+  }
+})
 
 vi.mock('../hooks/useDesktopLayout', () => ({
   useDesktopLayout: vi.fn(() => false),
@@ -456,7 +465,8 @@ describe('Scanner', () => {
     openOverflow()
     fireEvent.click(screen.getByRole('button', { name: 'Switch camera' }))
     expect(screen.queryByText('Screw')).not.toBeInTheDocument()
-    expect(assistants[0].clearMemory).toHaveBeenCalledTimes(1)
+    // Scene-only flip: the job's memory survives the switch.
+    expect(assistants[0].clearMemory).not.toHaveBeenCalled()
   })
 
   it('hides the switcher when only one camera exists', async () => {
@@ -473,9 +483,10 @@ describe('Scanner', () => {
     mockCamera(true, [{ kind: 'videoinput' }, { kind: 'videoinput' }, { kind: 'audioinput' }])
     render(<Scanner />)
     openOverflow()
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 50))
-    })
+    // No state change to wait on when cameras > 1: wait for the enumeration
+    // call itself, then prove the switcher survived it.
+    const enumerateDevices = vi.mocked(navigator.mediaDevices.enumerateDevices)
+    await waitFor(() => expect(enumerateDevices).toHaveBeenCalled())
     expect(screen.getByRole('button', { name: 'Switch camera' })).toBeInTheDocument()
   })
 
@@ -669,6 +680,35 @@ describe('Scanner', () => {
     const dock = screen.getByTestId('bottom-dock')
     expect(dock).toHaveClass('transition-transform')
     expect(dock.style.transform).toBe('translateY(-120px)')
+  })
+
+  it('clamps the keyboard lift so the dock stops at the header bottom', () => {
+    // Dock top at 250, header bottom at 100: a 300px lift clamps to 150px.
+    mockCamera(true)
+    vi.mocked(useKeyboardShift).mockReturnValue(300)
+    const { rerender } = render(<Scanner />)
+    const dock = screen.getByTestId('bottom-dock')
+    const header = dock.parentElement?.querySelector('header')
+    if (!header) throw new Error('pane header missing')
+    Object.defineProperty(dock, 'offsetTop', { value: 250, configurable: true })
+    Object.defineProperty(header, 'offsetTop', { value: 0, configurable: true })
+    Object.defineProperty(header, 'offsetHeight', { value: 100, configurable: true })
+    rerender(<Scanner />)
+    expect(screen.getByTestId('bottom-dock').style.transform).toBe('translateY(-150px)')
+  })
+
+  it('pins the query bar below the dock scroll region', () => {
+    mockCamera(true)
+    render(<Scanner />)
+    const dock = screen.getByTestId('bottom-dock')
+    expect(dock).toHaveClass('max-h-[calc(100dvh-8rem)]', 'pointer-events-none')
+    expect(dock.className).not.toContain('overflow-y-auto')
+    const scroller = screen.getByTestId('dock-scroll')
+    expect(scroller).toHaveClass('overflow-y-auto')
+    expect(dock).toContainElement(scroller)
+    const query = screen.getByRole('form', { name: 'Text query' })
+    expect(dock).toContainElement(query)
+    expect(scroller).not.toContainElement(query)
   })
 
   it('surfaces a missing API key instead of calling the API', async () => {
@@ -945,7 +985,11 @@ describe('Scanner', () => {
       await act(async () => {
         assistants[0].callbacks.onInterim?.('show the scr')
       })
-      expect(screen.getByTestId('voice-caption')).toHaveTextContent('show the scr')
+      const caption = screen.getByTestId('voice-caption')
+      expect(caption).toHaveTextContent('show the scr')
+      // Interim words are visual only; announcing each partial stutters.
+      expect(caption).toHaveAttribute('aria-live', 'off')
+      expect(caption).not.toHaveAttribute('role')
       await act(async () => {
         assistants[0].callbacks.onPhrase('show screws')
       })
@@ -1021,6 +1065,11 @@ describe('Scanner', () => {
     })
     expect(await screen.findByText('ABC-123')).toBeInTheDocument()
     expect(screen.getByText('24V DC')).toBeInTheDocument()
+    expect(screen.getByTestId('label-findings')).toBeInTheDocument()
+    // Long OCR tokens must wrap inside the toast, not push it wider.
+    for (const chip of [screen.getByText('ABC-123'), screen.getByText('24V DC')]) {
+      expect(chip).toHaveClass('max-w-full', 'break-all')
+    }
     expect(reasonSpatial).not.toHaveBeenCalled()
     expect(segmentImage).not.toHaveBeenCalled()
     const calls = vi.mocked(speakText).mock.calls
@@ -1035,7 +1084,7 @@ describe('Scanner', () => {
     await act(async () => {
       assistants[0].callbacks.onPhrase('read the label')
     })
-    expect(screen.queryByRole('status', { name: 'Label findings' })).not.toBeInTheDocument()
+    expect(screen.queryByTestId('label-findings')).not.toBeInTheDocument()
     const calls = vi.mocked(speakText).mock.calls
     expect(calls[calls.length - 1][0]).toContain('could not read')
   })
@@ -2268,9 +2317,10 @@ describe('Scanner', () => {
     })
     render(<Scanner />)
     openOverflow()
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 50))
-    })
+    // A failed enumeration keeps the switcher: wait for the attempt, then
+    // prove the switcher is still shown.
+    const enumerateDevices = vi.mocked(navigator.mediaDevices.enumerateDevices)
+    await waitFor(() => expect(enumerateDevices).toHaveBeenCalled())
     expect(screen.getByRole('button', { name: 'Switch camera' })).toBeInTheDocument()
   })
 
@@ -2457,6 +2507,35 @@ describe('Scanner', () => {
     expect(await screen.findByText('MID-DRIVE DRIVE BELT')).toBeInTheDocument()
   })
 
+  it('reserves card-slot height while guidance loads and resolves', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Screw',
+      approx_x: 10,
+      approx_y: 10,
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    let release!: (value: GuidanceResult) => void
+    vi.mocked(fetchGuidance).mockImplementationOnce(
+      () =>
+        new Promise<GuidanceResult>((resolve) => {
+          release = resolve
+        }),
+    )
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show screws')
+    })
+    expect(await screen.findByRole('status', { name: 'Loading guidance' })).toBeInTheDocument()
+    expect(screen.getByTestId('hud-slot')).toHaveClass('min-h-[160px]')
+    await act(async () => {
+      release(validGuidanceFixture)
+    })
+    expect(await screen.findByText('MID-DRIVE DRIVE BELT')).toBeInTheDocument()
+    expect(screen.getByTestId('hud-slot')).toHaveClass('min-h-[160px]')
+  })
+
   it('keeps the AR pipeline when guidance fetch fails', async () => {
     mockCamera(true)
     vi.mocked(reasonSpatial).mockResolvedValue({
@@ -2573,6 +2652,290 @@ describe('Scanner', () => {
     expect(screen.queryByText('Screw')).not.toBeInTheDocument()
     expect(assistants[0].clearMemory).toHaveBeenCalledTimes(1)
   })
+
+  it('mounts cleanly under StrictMode so guidance still resolves', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Screw',
+      approx_x: 10,
+      approx_y: 10,
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    vi.mocked(fetchGuidance).mockResolvedValue(validGuidanceFixture)
+    render(
+      <StrictMode>
+        <Scanner />
+      </StrictMode>,
+    )
+    // StrictMode double-mounts effects; the second mount must leave the
+    // mounted guard true or the guidance resolver bails forever.
+    const live = assistants[assistants.length - 1]
+    await act(async () => {
+      live.callbacks.onPhrase('show screws')
+    })
+    expect(await screen.findByText('Remove the belt cover')).toBeInTheDocument()
+  })
+
+  it('drops an in-flight phrase result after Clear AR View changes the scene', async () => {
+    mockCamera(true)
+    let releaseReason!: (value: SpatialResult) => void
+    vi.mocked(reasonSpatial).mockImplementationOnce(
+      () =>
+        new Promise<SpatialResult>((resolve) => {
+          releaseReason = resolve
+        }),
+    )
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show screws')
+    })
+    openOverflow()
+    fireEvent.click(screen.getByText('Clear AR View'))
+    await act(async () => {
+      releaseReason({
+        target_label: 'Screw',
+        approx_x: 10,
+        approx_y: 10,
+        speech_response: null,
+        display_mode: 'visual_only',
+      })
+    })
+    // Computed against the old scene: no paint, no guidance lookup.
+    expect(screen.queryByText('Screw')).not.toBeInTheDocument()
+    expect(fetchGuidance).not.toHaveBeenCalled()
+  })
+
+  it('a late camera stream cannot clobber an uploaded photo', async () => {
+    let resolveStream!: (stream: MediaStream) => void
+    const getUserMedia = vi.fn(
+      () =>
+        new Promise<MediaStream>((resolve) => {
+          resolveStream = resolve
+        }),
+    )
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: { getUserMedia, enumerateDevices: vi.fn(async () => []) },
+      configurable: true,
+    })
+    const still = document.createElement('canvas')
+    still.width = 640
+    still.height = 480
+    vi.mocked(decodePhotoFile).mockResolvedValue(still)
+    const media = mockMediaControls()
+    try {
+      render(<Scanner />)
+      await waitFor(() => expect(getUserMedia).toHaveBeenCalledTimes(1))
+      const file = new File(['bytes'], 'engine.jpg', { type: 'image/jpeg' })
+      fireEvent.change(screen.getByLabelText('Upload photo'), { target: { files: [file] } })
+      expect(await screen.findByAltText('Uploaded photo')).toBeInTheDocument()
+      expect(screen.getByText('FROZEN')).toBeInTheDocument()
+      const { stream, stop } = trackedStream()
+      await act(async () => {
+        resolveStream(stream)
+      })
+      // Let the attach continuation run: the still must survive it.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      })
+      expect(screen.getByAltText('Uploaded photo')).toBeInTheDocument()
+      expect(screen.getByText('FROZEN')).toBeInTheDocument()
+      expect(screen.queryByText('LIVE')).not.toBeInTheDocument()
+      expect(stop).toHaveBeenCalled()
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('a stale error timer cannot wipe a newer analyzing status', async () => {
+    vi.useFakeTimers()
+    try {
+      mockCamera(true)
+      let releaseReason!: (value: SpatialResult) => void
+      vi.mocked(reasonSpatial)
+        .mockRejectedValueOnce(new Error('network down'))
+        .mockImplementationOnce(
+          () =>
+            new Promise<SpatialResult>((resolve) => {
+              releaseReason = resolve
+            }),
+        )
+      render(<Scanner />)
+      await enableVoiceMode()
+      expect(screen.getByText('Listening')).toBeInTheDocument()
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('show screws')
+      })
+      expect(screen.getByText('Error')).toBeInTheDocument()
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('show bolts')
+      })
+      expect(screen.getByText('Analyzing…')).toBeInTheDocument()
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2100)
+      })
+      expect(screen.getByText('Analyzing…')).toBeInTheDocument()
+      await act(async () => {
+        releaseReason({
+          target_label: 'Bolt',
+          approx_x: 80,
+          approx_y: 80,
+          speech_response: null,
+          display_mode: 'visual_only',
+        })
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('an older reply cannot downgrade a newer analyzing status', async () => {
+    mockCamera(true)
+    let releaseSpeak!: () => void
+    vi.mocked(speakText).mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseSpeak = resolve
+        }),
+    )
+    let releaseReason!: (value: SpatialResult) => void
+    vi.mocked(reasonSpatial)
+      .mockResolvedValueOnce({
+        target_label: 'Screw',
+        approx_x: 10,
+        approx_y: 10,
+        speech_response: 'found it',
+        display_mode: 'speech_and_visual',
+      })
+      .mockImplementationOnce(
+        () =>
+          new Promise<SpatialResult>((resolve) => {
+            releaseReason = resolve
+          }),
+      )
+    render(<Scanner />)
+    await enableVoiceMode()
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show screws')
+    })
+    expect(await screen.findByText('Speaking')).toBeInTheDocument()
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show bolts')
+    })
+    expect(screen.getByText('Analyzing…')).toBeInTheDocument()
+    await act(async () => {
+      releaseSpeak()
+    })
+    expect(screen.getByText('Analyzing…')).toBeInTheDocument()
+    expect(screen.queryByText('Listening')).not.toBeInTheDocument()
+    await act(async () => {
+      releaseReason({
+        target_label: 'Bolt',
+        approx_x: 80,
+        approx_y: 80,
+        speech_response: null,
+        display_mode: 'visual_only',
+      })
+    })
+  })
+
+  it('switching cameras preserves the job while clearing the scene', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Screw',
+      approx_x: 10,
+      approx_y: 10,
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    vi.mocked(fetchGuidance).mockResolvedValue(validGuidanceFixture)
+    vi.mocked(extractLabelText).mockResolvedValue(['ABC-123'])
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show screws')
+    })
+    expect(await screen.findByText('Remove the belt cover')).toBeInTheDocument()
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('read this label')
+    })
+    expect(await screen.findByText('ABC-123')).toBeInTheDocument()
+    openOverflow()
+    fireEvent.click(screen.getByRole('button', { name: 'Switch camera' }))
+    // Scene-only: paint, callout, and tracking go...
+    expect(screen.queryByText('Screw')).not.toBeInTheDocument()
+    expect(screen.queryByText('Tracking')).not.toBeInTheDocument()
+    // ...but findings, guidance, and memory survive the switch.
+    expect(screen.getByText('ABC-123')).toBeInTheDocument()
+    expect(screen.getByText('Remove the belt cover')).toBeInTheDocument()
+    expect(assistants[0].clearMemory).not.toHaveBeenCalled()
+  })
+
+  it('step commands work without an API key', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Screw',
+      approx_x: 10,
+      approx_y: 10,
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    vi.mocked(fetchGuidance).mockResolvedValue(validGuidanceFixture)
+    render(<Scanner />)
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('show screws')
+    })
+    expect(await screen.findByText('Step 1 of 3')).toBeInTheDocument()
+    vi.stubEnv('VITE_META_MODEL_API_KEY', '')
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('done')
+    })
+    expect(await screen.findByText('Step 2 of 3')).toBeInTheDocument()
+    expect(reasonSpatial).toHaveBeenCalledTimes(1)
+  })
+
+  it('files the live procedure when a superseding scan fires', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Belt',
+      approx_x: 10,
+      approx_y: 10,
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    vi.mocked(fetchGuidance)
+      .mockResolvedValueOnce(validGuidanceFixture)
+      .mockRejectedValueOnce(new Error('manual offline'))
+    const captured = captureDownload()
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container)
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('show belt')
+      })
+      expect(await screen.findByText('Remove the belt cover')).toBeInTheDocument()
+      // Unfreezing unlocks tracking while keeping the card, so the next
+      // phrase fires a fresh guidance request that supersedes it — and
+      // files it first, even though the fetch then fails.
+      await screen.findByText('LIVE')
+      pressFreezeFrame()
+      expect(await screen.findByText('FROZEN')).toBeInTheDocument()
+      pressFreezeFrame()
+      await screen.findByText('LIVE')
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('show alternator')
+      })
+      expect(fetchGuidance).toHaveBeenCalledTimes(2)
+      openOverflow()
+      fireEvent.click(screen.getByText('Export Report'))
+      await waitFor(() => expect(captured.blob).not.toBeNull())
+      const text = (await captured.blob?.text()) ?? ''
+      expect(text).toContain('<h2>Earlier this session</h2>')
+      expect(text).toContain('<h2>MID-DRIVE DRIVE BELT</h2>')
+    } finally {
+      media.restore()
+    }
+  })
 })
 
 describe('Scanner states (Wave 3)', () => {
@@ -2599,14 +2962,16 @@ describe('Scanner states (Wave 3)', () => {
     mockCamera(true)
     const pill = await phraseWithTarget('Edge screw', 2, 60)
     expect(pill).toHaveClass('backdrop-blur-md', 'rounded-full')
-    expect(styleAttr(pill)).toContain('left: 2%')
+    expect(styleAttr(pill)).toContain('calc(2%')
+    expect(styleAttr(pill)).toContain('env(safe-area-inset-left)')
     expect(styleAttr(pill)).toContain('translate(0, calc(-100% - 8px))')
   })
 
   it('clamps right-edge callout pills so they never overflow the viewport', async () => {
     mockCamera(true)
     const pill = await phraseWithTarget('Far connector', 98, 60)
-    expect(styleAttr(pill)).toContain('left: 98%')
+    expect(styleAttr(pill)).toContain('calc(98%')
+    expect(styleAttr(pill)).toContain('env(safe-area-inset-right)')
     expect(styleAttr(pill)).toContain('translate(-100%, calc(-100% - 8px))')
   })
 
@@ -2639,6 +3004,29 @@ describe('Scanner states (Wave 3)', () => {
     expect(
       styleAttr(screen.getByRole('status', { name: 'Located: Blend door' })),
     ).toContain('left: 60%')
+  })
+
+  it('maps voice callouts through the cover fit when aspects mismatch', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Side bolt',
+      approx_x: 25,
+      approx_y: 50,
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    const { container } = render(<Scanner />)
+    setVideoDims(container, 640, 480)
+    // Portrait stage, landscape frame: 25% across the frame crops to ~5.6%.
+    const stage = screen.getByTestId('zoom-stage')
+    Object.defineProperty(stage, 'clientWidth', { value: 300, configurable: true })
+    Object.defineProperty(stage, 'clientHeight', { value: 400, configurable: true })
+    await act(async () => {
+      assistants[0].callbacks.onPhrase('side bolt')
+    })
+    const pill = await screen.findByText('Side bolt')
+    expect(styleAttr(pill)).toContain('5.555')
+    expect(styleAttr(pill)).not.toContain('left: 25%')
   })
 
   it('paints neon outlines while keeping per-kind colors', async () => {
@@ -2689,10 +3077,16 @@ describe('Scanner states (Wave 3)', () => {
   it('dismisses the error dock through a 48px focus-visible target', async () => {
     mockCamera(false)
     render(<Scanner />)
-    expect(await screen.findByRole('alert')).toHaveTextContent('Camera access denied')
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Camera access denied')
+    expect(alert).toHaveClass('bg-black/85')
+    expect(alert.className).not.toContain('backdrop-blur')
     const dismiss = screen.getByRole('button', { name: 'Dismiss error' })
     expect(dismiss).toHaveClass('min-h-[48px]', 'min-w-[48px]')
     expect(dismiss.className).toContain('focus-visible:ring-2')
+    expect(dismiss.className).toContain('motion-safe:active:scale-95')
+    const retry = screen.getByRole('button', { name: 'Try camera again' })
+    expect(retry.className).toContain('focus-visible:ring-2')
     fireEvent.click(dismiss)
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
@@ -2704,7 +3098,7 @@ describe('Scanner states (Wave 3)', () => {
       mockCamera(true)
       render(<Scanner />)
       expect(await screen.findByText(/You're offline/)).toBeInTheDocument()
-      expect(screen.getByRole('status', { name: /offline/i })).toBeInTheDocument()
+      expect(screen.getByTestId('dock-status')).toHaveTextContent("You're offline")
       Object.defineProperty(navigator, 'onLine', { value: true, configurable: true })
       act(() => {
         window.dispatchEvent(new window.Event('offline'))
@@ -2713,6 +3107,31 @@ describe('Scanner states (Wave 3)', () => {
       await waitFor(() => {
         expect(screen.queryByText(/You're offline/)).not.toBeInTheDocument()
       })
+    } finally {
+      if (original) {
+        Object.defineProperty(navigator, 'onLine', original)
+      } else {
+        delete (navigator as unknown as Record<string, unknown>)['onLine']
+      }
+    }
+  })
+
+  it('announces dock banners through a single live region', async () => {
+    const original = Object.getOwnPropertyDescriptor(navigator, 'onLine')
+    Object.defineProperty(navigator, 'onLine', { value: false, configurable: true })
+    try {
+      mockCamera(true)
+      render(<Scanner />)
+      const region = await screen.findByTestId('dock-status')
+      expect(region).toHaveAttribute('role', 'status')
+      expect(region).toHaveTextContent("You're offline")
+      // No nested live regions: one announcement stream for all banners.
+      expect(region.querySelectorAll('[role="status"],[role="alert"]')).toHaveLength(0)
+      // Solid scrims, not per-frame backdrop blur over the video feed.
+      for (const banner of Array.from(region.children)) {
+        expect(banner).toHaveClass('bg-black/85')
+        expect(banner.className).not.toContain('backdrop-blur')
+      }
     } finally {
       if (original) {
         Object.defineProperty(navigator, 'onLine', original)
@@ -2736,7 +3155,7 @@ describe('Scanner states (Wave 3)', () => {
       assistants[0].callbacks.onPhrase('nothing here')
     })
     expect(await screen.findByText(/No matching part found/)).toBeInTheDocument()
-    expect(screen.getByRole('status', { name: /No matching part/ })).toBeInTheDocument()
+    expect(screen.getByTestId('dock-status')).toHaveTextContent('No matching part found')
   })
 
   it('clears the empty-target notice on the next successful scan', async () => {
@@ -2785,7 +3204,7 @@ describe('Scanner states (Wave 3)', () => {
     expect(indicator).toBeInTheDocument()
     expect(indicator).toHaveClass('self-center')
     expect(indicator.querySelector('span')).toHaveClass('motion-safe:animate-pulse')
-    expect(screen.getByRole('status', { name: 'Analyzing' })).toBeInTheDocument()
+    expect(screen.getByText('Analyzing…')).toBeInTheDocument()
     await act(async () => {
       release({
         target_label: 'Screw',
@@ -2857,7 +3276,9 @@ describe('Scanner freeze frame', () => {
     try {
       render(<Scanner />)
       await waitForLive()
-      expect(tapTarget()).toBeInTheDocument()
+      const layer = tapTarget()
+      expect(layer).toBeInTheDocument()
+      expect(layer.className).toContain('focus-visible:ring-2')
     } finally {
       media.restore()
     }
@@ -3016,6 +3437,53 @@ describe('Scanner freeze frame', () => {
         x: 50,
         y: (220 / 480) * 100,
       })
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('identifies the layer center on keyboard activation', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      const layer = tapTarget()
+      setTapRect(layer)
+      await act(async () => {
+        fireEvent.keyDown(layer, { key: 'Enter' })
+      })
+      expect(segmentImage).toHaveBeenCalledWith('data:image/jpeg;base64,AAA', 'tapped part', {
+        x: 320,
+        y: 240,
+        width: 640,
+        height: 480,
+      })
+      expect(await screen.findByText('M6 hex bolt')).toBeInTheDocument()
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('treats Space like Enter and ignores other keys', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      const layer = tapTarget()
+      setTapRect(layer)
+      await act(async () => {
+        fireEvent.keyDown(layer, { key: ' ' })
+      })
+      expect(segmentImage).toHaveBeenCalledTimes(1)
+      await act(async () => {
+        fireEvent.keyDown(layer, { key: 'a' })
+      })
+      expect(segmentImage).toHaveBeenCalledTimes(1)
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     } finally {
       media.restore()
     }
@@ -3420,7 +3888,7 @@ describe('Scanner freeze frame', () => {
       await act(async () => {
         fireEvent.click(layer, { clientX: 320, clientY: 220 })
       })
-      expect(screen.getByRole('status', { name: 'Analyzing' })).toBeInTheDocument()
+      expect(screen.getByText('Analyzing…')).toBeInTheDocument()
       await act(async () => {
         releaseMasks([maskRecord({ x1: 300, y1: 200, x2: 340, y2: 240, w: 41, h: 41 })])
       })
@@ -3811,7 +4279,9 @@ describe('Scanner freeze frame', () => {
     mockCamera(true)
     const media = mockMediaControls()
     try {
-      render(<Scanner />)
+      const { container } = render(<Scanner />)
+      // Freezing needs a real frame: zero-dimension video refuses.
+      setVideoDims(container, 640, 480)
       expect(screen.queryByText('Drag to circle a part · tap to identify')).not.toBeInTheDocument()
       await waitForLive()
       expect(screen.getByText('Drag to circle a part · tap to identify')).toBeInTheDocument()
@@ -3833,6 +4303,8 @@ describe('Scanner freeze frame', () => {
       mockCamera(true)
       render(<Scanner />)
       await waitForLive()
+      // The voice hint only rotates once the one-time coach is dismissed.
+      fireEvent.click(screen.getByRole('button', { name: 'Dismiss voice tip' }))
       expect(screen.getByText('Drag to circle a part · tap to identify')).toBeInTheDocument()
       await act(async () => {
         vi.advanceTimersByTime(8000)
@@ -3850,6 +4322,29 @@ describe('Scanner freeze frame', () => {
         vi.advanceTimersByTime(8000)
       })
       expect(screen.getByText('Drag to circle a part · tap to identify')).toBeInTheDocument()
+    } finally {
+      media.restore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('rotates the voice hint out while the coach mark is visible', async () => {
+    window.localStorage.removeItem('wrenchmind.voiceCoachSeen')
+    vi.useFakeTimers()
+    const media = mockMediaControls()
+    try {
+      mockCamera(true)
+      render(<Scanner />)
+      await waitForLive()
+      expect(screen.getByText(/Voice mode is in the/)).toBeInTheDocument()
+      // Six rotations: the voice hint never appears alongside the coach.
+      for (let i = 0; i < 6; i++) {
+        expect(screen.queryByText('Voice mode lives in the ⋯ menu')).not.toBeInTheDocument()
+        await act(async () => {
+          vi.advanceTimersByTime(8000)
+        })
+      }
+      expect(screen.queryByText('Voice mode lives in the ⋯ menu')).not.toBeInTheDocument()
     } finally {
       media.restore()
       vi.useRealTimers()
@@ -4115,6 +4610,155 @@ describe('Scanner freeze frame', () => {
     }
   })
 
+  it('shows uploaded photos unmirrored even on desktop', async () => {
+    vi.mocked(useDesktopLayout).mockReturnValue(true)
+    mockCamera(true)
+    const still = document.createElement('canvas')
+    still.width = 640
+    still.height = 480
+    vi.mocked(decodePhotoFile).mockResolvedValue(still)
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      await screen.findByText('LIVE')
+      expect(screen.getByLabelText('Live camera feed')).toHaveClass('-scale-x-100')
+      const file = new File(['bytes'], 'label.jpg', { type: 'image/jpeg' })
+      fireEvent.change(screen.getByLabelText('Upload photo'), { target: { files: [file] } })
+      const photo = await screen.findByAltText('Uploaded photo')
+      expect(photo).not.toHaveClass('-scale-x-100')
+      expect(container.querySelector('canvas')).not.toHaveClass('-scale-x-100')
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('silently ignores taps on the upload letterbox bars', async () => {
+    mockCamera(true)
+    const still = document.createElement('canvas')
+    still.width = 640
+    still.height = 480
+    vi.mocked(decodePhotoFile).mockResolvedValue(still)
+    const media = mockMediaControls()
+    try {
+      render(<Scanner />)
+      await screen.findByText('LIVE')
+      const file = new File(['bytes'], 'engine.jpg', { type: 'image/jpeg' })
+      fireEvent.change(screen.getByLabelText('Upload photo'), { target: { files: [file] } })
+      await screen.findByAltText('Uploaded photo')
+      const layer = tapTarget()
+      // Portrait view of a landscape photo: 87.5px bars top and bottom.
+      setTapRect(layer, { left: 0, top: 0, width: 300, height: 400 })
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 150, clientY: 40 })
+      })
+      expect(segmentImage).not.toHaveBeenCalled()
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+      expect(screen.queryByRole('status', { name: /Located:/ })).not.toBeInTheDocument()
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('maps taps on an uploaded photo through the contain letterbox', async () => {
+    mockCamera(true)
+    const still = document.createElement('canvas')
+    still.width = 640
+    still.height = 480
+    vi.mocked(decodePhotoFile).mockResolvedValue(still)
+    const media = mockMediaControls()
+    try {
+      render(<Scanner />)
+      await screen.findByText('LIVE')
+      const file = new File(['bytes'], 'engine.jpg', { type: 'image/jpeg' })
+      fireEvent.change(screen.getByLabelText('Upload photo'), { target: { files: [file] } })
+      await screen.findByAltText('Uploaded photo')
+      const layer = tapTarget()
+      // Portrait view of a landscape photo: 87.5px bars top and bottom;
+      // the center tap must map to frame center through containToMedia.
+      setTapRect(layer, { left: 0, top: 0, width: 300, height: 400 })
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 150, clientY: 200 })
+      })
+      expect(segmentImage).toHaveBeenCalledWith('data:image/jpeg;base64,AAA', 'tapped part', {
+        x: 320,
+        y: 240,
+        width: 640,
+        height: 480,
+      })
+      expect(await screen.findByText('M6 hex bolt')).toBeInTheDocument()
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('scales badge chrome for high-res frames', async () => {
+    mockCamera(true)
+    const writes: Array<[string, unknown]> = []
+    const ctx = new Proxy(
+      { marker: 'ctx' },
+      {
+        get: (target, prop) => {
+          if (prop === 'createImageData') {
+            return (w: number, h: number) => ({
+              data: new Uint8ClampedArray(w * h * 4),
+              width: w,
+              height: h,
+            })
+          }
+          if (prop === 'measureText') return () => ({ width: 12 })
+          return (target as Record<PropertyKey, unknown>)[prop] ?? (() => undefined)
+        },
+        set: (_target, prop, value) => {
+          writes.push([String(prop), value])
+          return true
+        },
+      },
+    )
+    const ctxSpy = vi
+      .spyOn(window.HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue(ctx as unknown as CanvasRenderingContext2D)
+    const media = mockMediaControls()
+    try {
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 1920, 1080)
+      await freezeFrame()
+      // 1080p frame shown at 400px tall: chrome scales by 2.7x.
+      const overlay = container.querySelector('canvas')
+      if (!overlay) throw new Error('missing overlay canvas')
+      Object.defineProperty(overlay, 'getBoundingClientRect', {
+        value: () => ({
+          left: 0,
+          top: 0,
+          width: 711,
+          height: 400,
+          x: 0,
+          y: 0,
+          right: 711,
+          bottom: 400,
+          toJSON: () => ({}),
+        }),
+        configurable: true,
+      })
+      const layer = tapTarget()
+      setTapRect(layer)
+      vi.mocked(parseSamStream).mockResolvedValueOnce([
+        maskRecord({ x1: 900, y1: 500, x2: 1000, y2: 600, w: 101, h: 101 }),
+      ])
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 320, clientY: 220 })
+      })
+      expect(await screen.findByText('M6 hex bolt')).toBeInTheDocument()
+      const widths = writes.filter(([k]) => k === 'lineWidth').map(([, v]) => v as number)
+      expect(widths.some((w) => Math.abs(w - 8.1) < 0.01)).toBe(true)
+      const blurs = writes.filter(([k]) => k === 'shadowBlur').map(([, v]) => v as number)
+      expect(blurs.some((b) => Math.abs(b - 32.4) < 0.05)).toBe(true)
+      expect(writes.some(([k, v]) => k === 'font' && String(v).includes('64.8'))).toBe(true)
+    } finally {
+      media.restore()
+      ctxSpy.mockRestore()
+    }
+  })
+
   it('keeps the live feed when a photo is unreadable', async () => {
     mockCamera(true)
     vi.mocked(decodePhotoFile).mockRejectedValue(new Error('Could not read that photo.'))
@@ -4230,6 +4874,347 @@ describe('Scanner freeze frame', () => {
       expect(screen.getByText('Remove the belt cover')).toBeInTheDocument()
       expect(screen.getByText('ABC-123')).toBeInTheDocument()
       expect(screen.queryByText('Screw')).not.toBeInTheDocument()
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('drains a queued phrase after a tap analysis finishes', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      let releaseMasks!: (value: MaskRecord[]) => void
+      vi.mocked(parseSamStream).mockImplementationOnce(
+        () =>
+          new Promise<MaskRecord[]>((resolve) => {
+            releaseMasks = resolve
+          }),
+      )
+      vi.mocked(reasonSpatial).mockResolvedValue({
+        target_label: 'Bolt',
+        approx_x: 80,
+        approx_y: 80,
+        speech_response: null,
+        display_mode: 'visual_only',
+      })
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      const layer = tapTarget()
+      setTapRect(layer)
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 320, clientY: 220 })
+      })
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('show bolts')
+      })
+      expect(reasonSpatial).not.toHaveBeenCalled()
+      await act(async () => {
+        releaseMasks([])
+      })
+      // The tap held the lock; its finally must release the queued phrase.
+      expect(reasonSpatial).toHaveBeenCalledWith(
+        ['data:image/jpeg;base64,AAA'],
+        'show bolts',
+        '',
+      )
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('drains a queued phrase after a circle analysis finishes', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      let releaseMasks!: (value: MaskRecord[]) => void
+      vi.mocked(parseSamStream).mockImplementationOnce(
+        () =>
+          new Promise<MaskRecord[]>((resolve) => {
+            releaseMasks = resolve
+          }),
+      )
+      vi.mocked(reasonSpatial).mockResolvedValue({
+        target_label: 'Bolt',
+        approx_x: 80,
+        approx_y: 80,
+        speech_response: null,
+        display_mode: 'visual_only',
+      })
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      setStageDims(320, 240)
+      const layer = tapTarget()
+      setTapRect(layer)
+      await act(async () => {
+        traceLoop(layer, 100, 100, 200, 200)
+      })
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('show bolts')
+      })
+      expect(reasonSpatial).not.toHaveBeenCalled()
+      await act(async () => {
+        releaseMasks([])
+      })
+      expect(reasonSpatial).toHaveBeenCalledWith(
+        ['data:image/jpeg;base64,AAA'],
+        'show bolts',
+        '',
+      )
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('drops an in-flight tap result after Clear AR View changes the scene', async () => {
+    mockCamera(true)
+    const media = mockMediaControls()
+    try {
+      let releaseMasks!: (value: MaskRecord[]) => void
+      vi.mocked(parseSamStream).mockImplementationOnce(
+        () =>
+          new Promise<MaskRecord[]>((resolve) => {
+            releaseMasks = resolve
+          }),
+      )
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      const layer = tapTarget()
+      setTapRect(layer)
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 320, clientY: 220 })
+      })
+      openOverflow()
+      fireEvent.click(screen.getByText('Clear AR View'))
+      await act(async () => {
+        releaseMasks([maskRecord({ x1: 300, y1: 200, x2: 340, y2: 240, w: 41, h: 41 })])
+      })
+      expect(screen.queryByText('M6 hex bolt')).not.toBeInTheDocument()
+      expect(assistants[0].pushMemory).not.toHaveBeenCalled()
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('uploading a photo clears the previous scene first', async () => {
+    mockCamera(true)
+    vi.mocked(reasonSpatial).mockResolvedValue({
+      target_label: 'Screw',
+      approx_x: 10,
+      approx_y: 10,
+      speech_response: null,
+      display_mode: 'visual_only',
+    })
+    const still = document.createElement('canvas')
+    still.width = 640
+    still.height = 480
+    vi.mocked(decodePhotoFile).mockResolvedValue(still)
+    const media = mockMediaControls()
+    try {
+      render(<Scanner />)
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('show screws')
+      })
+      expect(await screen.findByText('Screw')).toBeInTheDocument()
+      expect(screen.getByText('Tracking')).toBeInTheDocument()
+      const file = new File(['bytes'], 'engine.jpg', { type: 'image/jpeg' })
+      fireEvent.change(screen.getByLabelText('Upload photo'), { target: { files: [file] } })
+      expect(await screen.findByAltText('Uploaded photo')).toBeInTheDocument()
+      expect(screen.queryByText('Screw')).not.toBeInTheDocument()
+      expect(screen.queryByText('Tracking')).not.toBeInTheDocument()
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('cancels a pending long-press when the release lands off-layer', async () => {
+    vi.useFakeTimers()
+    const media = mockMediaControls()
+    try {
+      mockCamera(true)
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      const layer = tapTarget()
+      setTapRect(layer)
+      vi.mocked(parseSamStream).mockResolvedValueOnce([
+        maskRecord({ x1: 300, y1: 200, x2: 340, y2: 240, w: 41, h: 41 }),
+      ])
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 320, clientY: 220 })
+      })
+      expect(screen.getByText('M6 hex bolt')).toBeInTheDocument()
+      const segments = vi.mocked(segmentImage).mock.calls.length
+      await act(async () => {
+        fireEvent.pointerDown(layer, { clientX: 320, clientY: 220 })
+      })
+      // Released over another element: the layer never sees pointerup.
+      fireEvent.pointerUp(document.body, { clientX: 10, clientY: 10 })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000)
+      })
+      // No stale removal fired...
+      expect(screen.getByText('M6 hex bolt')).toBeInTheDocument()
+      // ...and the next tap is not swallowed.
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 320, clientY: 220 })
+      })
+      expect(vi.mocked(segmentImage).mock.calls.length).toBe(segments + 1)
+    } finally {
+      media.restore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('frees the next tap after an off-layer release follows a fired long-press', async () => {
+    vi.useFakeTimers()
+    const media = mockMediaControls()
+    try {
+      mockCamera(true)
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      const layer = tapTarget()
+      setTapRect(layer)
+      vi.mocked(parseSamStream).mockResolvedValueOnce([
+        maskRecord({ x1: 300, y1: 200, x2: 340, y2: 240, w: 41, h: 41 }),
+      ])
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 320, clientY: 220 })
+      })
+      expect(screen.getByText('M6 hex bolt')).toBeInTheDocument()
+      const segments = vi.mocked(segmentImage).mock.calls.length
+      await act(async () => {
+        fireEvent.pointerDown(layer, { clientX: 320, clientY: 220 })
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500)
+      })
+      // The hold fired: outline removed, release click suppressed.
+      expect(screen.queryByText('M6 hex bolt')).not.toBeInTheDocument()
+      fireEvent.pointerUp(document.body, { clientX: 10, clientY: 10 })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      await act(async () => {
+        fireEvent.click(layer, { clientX: 320, clientY: 220 })
+      })
+      expect(vi.mocked(segmentImage).mock.calls.length).toBe(segments + 1)
+    } finally {
+      media.restore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not arm refresh ticks for scans made while frozen', async () => {
+    vi.useFakeTimers()
+    const media = mockMediaControls()
+    try {
+      mockCamera(true)
+      vi.mocked(reasonSpatial).mockResolvedValue({
+        target_label: 'Screw',
+        approx_x: 10,
+        approx_y: 10,
+        speech_response: null,
+        display_mode: 'visual_only',
+      })
+      const { container } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      await freezeFrame()
+      await act(async () => {
+        assistants[0].callbacks.onPhrase('show screws')
+      })
+      expect(screen.getByText('Screw')).toBeInTheDocument()
+      expect(segmentImage).toHaveBeenCalledTimes(1)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10000)
+      })
+      expect(segmentImage).toHaveBeenCalledTimes(1)
+    } finally {
+      media.restore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('switches torch off before stopping tracks on unmount', async () => {
+    let releaseOff!: () => void
+    const offGate = new Promise<void>((resolve) => {
+      releaseOff = resolve
+    })
+    const { stream, applyConstraints } = torchStream(async (constraints?: {
+      advanced?: { torch?: boolean }[]
+    }) => {
+      if (constraints?.advanced?.[0]?.torch === false) await offGate
+    })
+    const track = stream.getVideoTracks()[0]
+    stream.getTracks = () => [track]
+    const stop = track.stop as Mock
+    mockCameraStream(stream)
+    const media = mockMediaControls()
+    try {
+      const { container, unmount } = render(<Scanner />)
+      setVideoDims(container, 640, 480)
+      const toggle = await screen.findByRole('button', { name: 'Flashlight' })
+      fireEvent.click(toggle)
+      await waitFor(() => expect(toggle).toHaveAttribute('aria-pressed', 'true'))
+      unmount()
+      // The hardware constraint is still in flight: nothing stopped yet.
+      expect(applyConstraints).toHaveBeenCalledWith({ advanced: [{ torch: false }] })
+      expect(stop).not.toHaveBeenCalled()
+      await act(async () => {
+        releaseOff()
+      })
+      expect(stop).toHaveBeenCalledTimes(1)
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('keeps an uploaded photo fitted when camera restart fails', async () => {
+    const getUserMedia = vi.fn(async (): Promise<MediaStream> => {
+      if (getUserMedia.mock.calls.length > 1) throw new Error('denied')
+      return FAKE_STREAM
+    })
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: { getUserMedia, enumerateDevices: vi.fn(async () => []) },
+      configurable: true,
+    })
+    const still = document.createElement('canvas')
+    still.width = 640
+    still.height = 480
+    vi.mocked(decodePhotoFile).mockResolvedValue(still)
+    const media = mockMediaControls()
+    try {
+      render(<Scanner />)
+      await screen.findByText('LIVE')
+      const file = new File(['bytes'], 'engine.jpg', { type: 'image/jpeg' })
+      fireEvent.change(screen.getByLabelText('Upload photo'), { target: { files: [file] } })
+      expect(await screen.findByAltText('Uploaded photo')).toBeInTheDocument()
+      pressFreezeFrame()
+      expect(await screen.findByRole('alert')).toHaveTextContent('Camera access denied')
+      // Failure falls back to frozen on the kept still — still an upload.
+      expect(screen.getByAltText('Uploaded photo')).toBeInTheDocument()
+      expect(screen.getByAltText('Uploaded photo')).toHaveClass('object-contain')
+      expect(screen.getByText('FROZEN')).toBeInTheDocument()
+    } finally {
+      media.restore()
+    }
+  })
+
+  it('refuses to freeze when the video has no dimensions yet', async () => {
+    const { stream, stop } = trackedStream()
+    mockCameraWithStream(stream)
+    const media = mockMediaControls()
+    try {
+      render(<Scanner />)
+      await screen.findByText('LIVE')
+      pressFreezeFrame()
+      expect(await screen.findByRole('alert')).toHaveTextContent('Camera frame not ready')
+      expect(screen.queryByText('FROZEN')).not.toBeInTheDocument()
+      expect(screen.getByText('LIVE')).toBeInTheDocument()
+      expect(stop).not.toHaveBeenCalled()
     } finally {
       media.restore()
     }
@@ -4536,6 +5521,8 @@ describe('Scanner zoom', () => {
     wheelZoomIn()
     const chip = screen.getByRole('button', { name: 'Reset zoom (currently 1.2x)' })
     expect(chip).toHaveTextContent('1.2× · tap to reset')
+    expect(chip).toHaveClass('min-h-[44px]')
+    expect(chip.className).toContain('focus-visible:ring-2')
     fireEvent.click(chip)
     expect(stageStyle()).toContain('scale(1)')
     expect(screen.queryByRole('button', { name: /Reset zoom/ })).not.toBeInTheDocument()
@@ -4554,6 +5541,16 @@ describe('Scanner zoom', () => {
     fireEvent(stage, ctrlWheel)
     expect(stageStyle()).toContain('scale(1.2)')
     fireEvent.wheel(stage, { deltaY: 100, clientX: 100, clientY: 100 })
+    expect(stageStyle()).toContain('scale(1)')
+  })
+
+  it('ignores meta-wheel so browser zoom keeps working', () => {
+    mockCamera(true)
+    render(<Scanner />)
+    const stage = screen.getByTestId('zoom-stage')
+    const metaWheel = createEvent.wheel(stage, { deltaY: -100, clientX: 100, clientY: 100 })
+    Object.defineProperty(metaWheel, 'metaKey', { value: true })
+    fireEvent(stage, metaWheel)
     expect(stageStyle()).toContain('scale(1)')
   })
 
@@ -4583,7 +5580,9 @@ describe('Scanner zoom', () => {
     mockCamera(true)
     const media = mockMediaControls()
     try {
-      render(<Scanner />)
+      const { container } = render(<Scanner />)
+      // Freezing needs a real frame: zero-dimension video refuses.
+      setVideoDims(container, 640, 480)
       expect(await screen.findByText('LIVE')).toBeInTheDocument()
       wheelZoomIn()
       pressFreezeFrame()
@@ -4641,18 +5640,23 @@ describe('tapToMedia', () => {
     expect(tap?.y).toBe(50)
   })
 
-  it('clamps letterbox-bar taps to the frame edge in contain mode', () => {
-    const tap = tapToMedia(
-      150,
-      40,
-      { left: 0, top: 0, width: 300, height: 400 },
-      640,
-      480,
-      1,
-      false,
-      'contain',
-    )
-    expect(tap?.point).toEqual({ x: 320, y: 0, width: 640, height: 480 })
+  it('ignores taps on contain letterbox bars', () => {
+    // Contain: 640x480 in 300x400 leaves 87.5px bars top/bottom. Bar taps
+    // resolve undefined so the caller can silently ignore them.
+    expect(
+      tapToMedia(150, 40, { left: 0, top: 0, width: 300, height: 400 }, 640, 480, 1, false, 'contain'),
+    ).toBeUndefined()
+    expect(
+      tapToMedia(150, 380, { left: 0, top: 0, width: 300, height: 400 }, 640, 480, 1, false, 'contain'),
+    ).toBeUndefined()
+  })
+
+  it('ignores taps on contain side bars', () => {
+    // Contain: 480x640 in 400x300 scales by 0.46875 to 225x300, centered
+    // with 87.5px bars left and right.
+    expect(
+      tapToMedia(40, 150, { left: 0, top: 0, width: 400, height: 300 }, 480, 640, 1, false, 'contain'),
+    ).toBeUndefined()
   })
 
   it('clamps out-of-frame taps into the media bounds', () => {
@@ -4752,6 +5756,45 @@ describe('clampZoomPan', () => {
       y: 0,
     })
   })
+
+  it('pins pan while contain content is smaller than the viewport', () => {
+    // 640x480 in 300x400 contains to 300x225: at 1x both axes pin centered.
+    expect(clampZoomPan(1, -50, -30, 300, 400, 'contain', 640, 480)).toEqual({
+      scale: 1,
+      x: 0,
+      y: 0,
+    })
+    // At 1.5x the width covers (clamped to [-150, 0]) while the height
+    // still pins centered at (400/2)*(1-1.5) = -100.
+    expect(clampZoomPan(1.5, -100, -50, 300, 400, 'contain', 640, 480)).toEqual({
+      scale: 1.5,
+      x: -100,
+      y: -100,
+    })
+  })
+
+  it('clamps contain pan against the fitted content box once it covers', () => {
+    // At 2x the 300x225 content spans 600x450: x covers ([-300, 0]), y covers
+    // ([-225, -175]) so the image cannot leave the viewport.
+    expect(clampZoomPan(2, -100, -100, 300, 400, 'contain', 640, 480)).toEqual({
+      scale: 2,
+      x: -100,
+      y: -175,
+    })
+    expect(clampZoomPan(2, -400, -300, 300, 400, 'contain', 640, 480)).toEqual({
+      scale: 2,
+      x: -300,
+      y: -225,
+    })
+  })
+
+  it('falls back to cover clamping without contain video dims', () => {
+    expect(clampZoomPan(2, -100, -100, 300, 400, 'contain', 0, 0)).toEqual({
+      scale: 2,
+      x: -100,
+      y: -100,
+    })
+  })
 })
 
 describe('zoomAt', () => {
@@ -4831,6 +5874,17 @@ describe('stageBoxToMedia', () => {
       y: 50,
     })
   })
+
+  it('ignores loops fully inside the contain bars', () => {
+    expect(stageBoxToMedia(50, 10, 250, 60, 300, 400, 640, 480, false, 'contain')).toBeUndefined()
+  })
+
+  it('clamps loops straddling the image edge into the frame', () => {
+    // Loop from the top bar into the image: the bar corner clamps to the
+    // image edge, so the box still resolves instead of failing.
+    const region = stageBoxToMedia(0, 40, 300, 200, 300, 400, 640, 480, false, 'contain')
+    expect(region?.box).toEqual({ x1: 0, y1: 0, x2: 639, y2: 240 })
+  })
 })
 
 describe('pinchZoom', () => {
@@ -4859,6 +5913,91 @@ describe('pinchZoom', () => {
   it('clamps the pan into the covering range', () => {
     const zoomed = pinchZoom({ scale: 2, x: -100, y: -100 }, 1, 100, 100, 1000, 100, 320, 240)
     expect(zoomed).toEqual({ scale: 2, x: 0, y: -100 })
+  })
+})
+
+describe('approxToStage', () => {
+  it('preserves percents when the frame fills the stage', () => {
+    expect(approxToStage(25, 50, 320, 240, 640, 480)).toEqual({ x: 25, y: 50 })
+  })
+
+  it('maps through the cover crop when aspects mismatch', () => {
+    // Portrait stage, landscape frame: the sides crop, so 25% across the
+    // frame lands ~5.6% across the stage.
+    const pt = approxToStage(25, 50, 300, 400, 640, 480)
+    expect(pt.x).toBeCloseTo(5.56, 1)
+    expect(pt.y).toBeCloseTo(50, 5)
+  })
+
+  it('flips in media space before the cover fit when mirrored', () => {
+    const pt = approxToStage(25, 50, 300, 400, 640, 480, true)
+    expect(pt.x).toBeCloseTo(94.44, 1)
+    expect(pt.y).toBeCloseTo(50, 5)
+  })
+
+  it('maps through the contain letterbox', () => {
+    // Frame top-left lands below the top bar, not at the stage corner.
+    const pt = approxToStage(0, 0, 300, 400, 640, 480, false, 'contain')
+    expect(pt.x).toBeCloseTo(0, 5)
+    expect(pt.y).toBeCloseTo(21.875, 2)
+    expect(approxToStage(50, 50, 300, 400, 640, 480, false, 'contain')).toEqual({ x: 50, y: 50 })
+  })
+
+  it('flips in media space before the contain fit when mirrored', () => {
+    expect(approxToStage(0, 50, 300, 400, 640, 480, true, 'contain')).toEqual({ x: 100, y: 50 })
+  })
+
+  it('falls back to a mirror flip without stage or media dims', () => {
+    expect(approxToStage(25, 50, 0, 0, 640, 480)).toEqual({ x: 25, y: 50 })
+    expect(approxToStage(25, 50, 300, 400, 0, 0, true)).toEqual({ x: 75, y: 50 })
+  })
+})
+
+describe('overlayUiScale', () => {
+  it('scales backing-store chrome to a constant display size', () => {
+    expect(overlayUiScale(400, 1080)).toBeCloseTo(2.7, 5)
+    expect(overlayUiScale(400, 2160)).toBeCloseTo(5.4, 5)
+  })
+
+  it('returns 1 without display or canvas dims', () => {
+    expect(overlayUiScale(0, 1080)).toBe(1)
+    expect(overlayUiScale(400, 0)).toBe(1)
+    expect(overlayUiScale(NaN, 1080)).toBe(1)
+  })
+})
+
+describe('calloutStyle', () => {
+  it('keeps edge anchoring for unzoomed pills', () => {
+    expect(calloutStyle(2, 60).transform).toContain('translate(0,')
+    expect(calloutStyle(98, 60).transform).toContain('translate(-100%,')
+    expect(calloutStyle(50, 5).transform).toContain('translate(-50%, 8px)')
+  })
+
+  it('carries safe-area insets with a minimum gutter on edge pills', () => {
+    const left = calloutStyle(2, 60)
+    expect(left.left).toContain('calc(2%')
+    expect(left.left).toContain('env(safe-area-inset-left)')
+    expect(left.left).toContain('0.5rem')
+    const right = calloutStyle(98, 60)
+    expect(right.left).toContain('env(safe-area-inset-right)')
+    expect(right.left).toContain('0.5rem')
+  })
+
+  it('re-projects the pill through zoom instead of parking at 1x', () => {
+    // Quarter point at 2x centered on a 400x300 stage lands at the origin.
+    const style = calloutStyle(25, 25, {
+      zoom: { scale: 2, x: -200, y: -150 },
+      stageW: 400,
+      stageH: 300,
+    })
+    expect(style.top).toContain('0%')
+  })
+
+  it('clamps the pill between the header and dock', () => {
+    const top = calloutStyle(50, 95, { stageW: 400, stageH: 800, headerH: 100, dockH: 200 })
+    expect(top.top).toContain('75%')
+    const bottom = calloutStyle(50, 2, { stageW: 400, stageH: 800, headerH: 100, dockH: 200 })
+    expect(bottom.top).toContain('12.5%')
   })
 })
 
@@ -4891,5 +6030,93 @@ describe('identifyWithContext', () => {
     vi.mocked(identifyComponent).mockResolvedValue('')
     await expect(identifyWithContext(video, box)).resolves.toBe('')
     expect(identifyComponent).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('fetchWithTimeout body deadline', () => {
+  it('aborts a stalled body after the absolute deadline', async () => {
+    vi.useFakeTimers()
+    try {
+      const fetchStub = vi.fn()
+      fetchStub.mockResolvedValue({
+        ok: true,
+        status: 200,
+        body: {
+          getReader: () => ({
+            read: async () => ({ done: true, value: undefined }),
+            cancel: async () => {},
+          }),
+        },
+      } as unknown as Response)
+      vi.stubGlobal('fetch', fetchStub)
+      const res = await fetchWithTimeout(
+        'https://example.com/stream',
+        {},
+        { timeoutMs: 1000, tag: 't', label: 'L' },
+      )
+      const [, init] = fetchStub.mock.calls[0] as [string, { signal: AbortSignal }]
+      expect(init.signal.aborted).toBe(false)
+      // Headers arrived long ago; the unconsumed body still trips the deadline.
+      await vi.advanceTimersByTimeAsync(1500)
+      expect(init.signal.aborted).toBe(true)
+      expect(res.ok).toBe(true)
+    } finally {
+      vi.useRealTimers()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('clears the deadline once the buffered body is consumed', async () => {
+    vi.useFakeTimers()
+    try {
+      const fetchStub = vi.fn()
+      fetchStub.mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ hello: 'world' }),
+        body: null,
+      } as unknown as Response)
+      vi.stubGlobal('fetch', fetchStub)
+      const res = await fetchWithTimeout(
+        'https://example.com/json',
+        {},
+        { timeoutMs: 1000, tag: 't', label: 'L' },
+      )
+      await res.json()
+      const [, init] = fetchStub.mock.calls[0] as [string, { signal: AbortSignal }]
+      await vi.advanceTimersByTimeAsync(1500)
+      expect(init.signal.aborted).toBe(false)
+    } finally {
+      vi.useRealTimers()
+      vi.unstubAllGlobals()
+    }
+  })
+})
+
+describe('segmentImage early close', () => {
+  it('cancels the SSE reader when the consumer stops early', async () => {
+    const actual = await vi.importActual<typeof import('../services/metaApi')>('../services/metaApi')
+    vi.stubEnv('VITE_META_MODEL_API_KEY', 'test-key')
+    const cancel = vi.fn(async () => {})
+    const read = vi.fn(async () => ({
+      done: false,
+      value: new TextEncoder().encode('data: {"type":"response.completed"}\n\n'),
+    }))
+    const fetchStub = vi.fn()
+    fetchStub.mockResolvedValue({
+      ok: true,
+      status: 200,
+      body: { getReader: () => ({ read, cancel }) },
+    } as unknown as Response)
+    vi.stubGlobal('fetch', fetchStub)
+    try {
+      const gen = actual.segmentImage('img', 'screw')
+      const first = await gen.next()
+      expect(first.done).toBe(false)
+      await gen.return(undefined)
+      expect(cancel).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })

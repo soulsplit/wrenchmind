@@ -65,6 +65,17 @@ describe('buildReport', () => {
     expect(buildReport({ guidance, stepIndex: 0 })).not.toContain('<img')
   })
 
+  it('keeps the first photo for a repeated step', () => {
+    const photos = [
+      { step: 1, dataUrl: 'data:image/jpeg;base64,FIRST' },
+      { step: 0, dataUrl: 'data:image/jpeg;base64,OTHER' },
+      { step: 1, dataUrl: 'data:image/jpeg;base64,SECOND' },
+    ]
+    const report = buildReport({ guidance, stepIndex: 2, photos })
+    expect(report).toContain('<img alt="Step 2 photo" src="data:image/jpeg;base64,FIRST">')
+    expect(report).not.toContain('SECOND')
+  })
+
   it('renders earlier procedures oldest-first with their own progress marks', () => {
     const first = {
       ...guidance,
@@ -153,6 +164,22 @@ describe('buildReport', () => {
     expect(report).toContain('&lt;img src=x onerror=alert(1)&gt;')
   })
 
+  it('escapes photo data URLs inside img src attributes', () => {
+    const photos = [{ step: 0, dataUrl: 'data:image/jpeg;base64,X" onerror="alert(1)' }]
+    const report = buildReport({ guidance, stepIndex: 0, photos })
+    expect(report).not.toContain('" onerror="alert(1)')
+    expect(report).toContain('src="data:image/jpeg;base64,X&quot; onerror=&quot;alert(1)"')
+  })
+
+  it('tolerates out-of-range step indices without crashing', () => {
+    const negative = buildReport({ guidance, stepIndex: -1 })
+    expect(negative).toContain('[ ] Step 1')
+    expect(negative).not.toContain('[&gt;]')
+    const pastEnd = buildReport({ guidance, stepIndex: 99 })
+    expect(pastEnd).toContain('[x] Step 1')
+    expect(pastEnd).not.toContain('[&gt;]')
+  })
+
   it('keeps warnings and errors from the session log', () => {
     logWarn('guidance', 'guidance unavailable: timeout')
     logError('phrase', 'SAM 503')
@@ -167,29 +194,37 @@ describe('buildReport', () => {
 
 describe('downloadReport', () => {
   it('downloads the report as an HTML file', async () => {
-    const captured: { blob: Blob | null } = { blob: null }
-    const createObjectURL = vi.fn((blob: Blob) => {
-      captured.blob = blob
-      return 'blob:fake'
-    })
-    const revokeObjectURL = vi.fn()
-    Object.defineProperty(URL, 'createObjectURL', { value: createObjectURL, configurable: true })
-    Object.defineProperty(URL, 'revokeObjectURL', { value: revokeObjectURL, configurable: true })
-    let download = ''
-    const click = vi
-      .spyOn(HTMLAnchorElement.prototype, 'click')
-      .mockImplementation(function (this: HTMLAnchorElement) {
-        download = this.download
+    vi.useFakeTimers()
+    try {
+      const captured: { blob: Blob | null } = { blob: null }
+      const createObjectURL = vi.fn((blob: Blob) => {
+        captured.blob = blob
+        return 'blob:fake'
       })
+      const revokeObjectURL = vi.fn()
+      Object.defineProperty(URL, 'createObjectURL', { value: createObjectURL, configurable: true })
+      Object.defineProperty(URL, 'revokeObjectURL', { value: revokeObjectURL, configurable: true })
+      let download = ''
+      const click = vi
+        .spyOn(HTMLAnchorElement.prototype, 'click')
+        .mockImplementation(function (this: HTMLAnchorElement) {
+          download = this.download
+        })
 
-    downloadReport({ guidance, stepIndex: 0 })
+      downloadReport({ guidance, stepIndex: 0 })
 
-    expect(createObjectURL).toHaveBeenCalledTimes(1)
-    expect(captured.blob?.type).toBe('text/html')
-    expect(download).toMatch(/^wrenchmind-report-.*\.html$/)
-    expect(click).toHaveBeenCalledTimes(1)
-    expect(revokeObjectURL).toHaveBeenCalledWith('blob:fake')
-    await expect(captured.blob?.text()).resolves.toContain('<h1>WrenchMind Repair Report</h1>')
+      expect(createObjectURL).toHaveBeenCalledTimes(1)
+      expect(captured.blob?.type).toBe('text/html')
+      expect(download).toMatch(/^wrenchmind-report-.*\.html$/)
+      expect(click).toHaveBeenCalledTimes(1)
+      // The blob survives the click for async downloaders; revoked after a delay.
+      expect(revokeObjectURL).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(5000)
+      expect(revokeObjectURL).toHaveBeenCalledWith('blob:fake')
+      await expect(captured.blob?.text()).resolves.toContain('<h1>WrenchMind Repair Report</h1>')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -215,7 +250,7 @@ describe('shareReport', () => {
       const data = vi.mocked(share.share).mock.calls[0][0] as { files: File[]; title: string }
       expect(data.files).toHaveLength(1)
       expect(data.files[0].name).toMatch(/^wrenchmind-report-.*\.html$/)
-      await expect(data.files[0].type).toBe('text/html')
+      expect(data.files[0].type).toBe('text/html')
       await expect(data.files[0].text()).resolves.toContain('<h1>WrenchMind Repair Report</h1>')
     } finally {
       clearShare()

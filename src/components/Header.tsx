@@ -104,6 +104,17 @@ export default function Header({
     }
   }, [overflowOpen])
 
+  // Return focus to the overflow toggle when the menu closes so keyboard
+  // users don't land on <body>. Skipped when the QR dialog takes over —
+  // it moves focus into itself and back here on close.
+  const menuWasOpen = useRef(false)
+  useEffect(() => {
+    if (menuWasOpen.current && !overflowOpen && !qrOpen) {
+      toggleRef.current?.focus()
+    }
+    menuWasOpen.current = overflowOpen
+  }, [overflowOpen, qrOpen])
+
   return (
     <header
       className="absolute top-0 inset-x-0 z-20"
@@ -132,8 +143,8 @@ export default function Header({
             aria-label="Freeze frame"
             aria-pressed={frozen}
             onClick={() => onFreezeToggle(!frozen)}
-            className={`min-h-[48px] min-w-[48px] px-3 rounded-lg flex items-center justify-center active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80 ${
-              frozen ? 'bg-green-500 text-white' : 'bg-white/10 text-white'
+            className={`min-h-[48px] min-w-[48px] px-3 rounded-lg flex items-center justify-center motion-safe:active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80 ${
+              frozen ? 'bg-confirm-deep text-white' : 'bg-white/10 text-white'
             }`}
           >
             <Icon d={PAUSE_BARS} />
@@ -145,8 +156,8 @@ export default function Header({
             aria-label="Flashlight"
             aria-pressed={torchOn}
             onClick={() => onTorchToggle(!torchOn)}
-            className={`min-h-[48px] min-w-[48px] px-3 rounded-lg flex items-center justify-center active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80 ${
-              torchOn ? 'bg-green-500 text-white' : 'bg-white/10 text-white'
+            className={`min-h-[48px] min-w-[48px] px-3 rounded-lg flex items-center justify-center motion-safe:active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80 ${
+              torchOn ? 'bg-confirm-deep text-white' : 'bg-white/10 text-white'
             }`}
           >
             <Icon d={FLASHLIGHT} />
@@ -159,7 +170,7 @@ export default function Header({
           onClick={() => setOverflowOpen((was) => !was)}
           aria-expanded={overflowOpen}
           aria-label="More options"
-          className="min-h-[48px] min-w-[48px] px-3 rounded-lg bg-white/10 text-white flex items-center justify-center active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+          className="min-h-[48px] min-w-[48px] px-3 rounded-lg bg-white/10 text-white flex items-center justify-center motion-safe:active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
         >
           <Dots />
         </button>
@@ -167,7 +178,8 @@ export default function Header({
       {overflowOpen && (
         <div
           ref={menuRef}
-          className="absolute flex flex-col items-stretch gap-2 w-64 rounded-xl bg-black/90 border border-white/20 p-3"
+          data-testid="overflow-menu"
+          className="absolute flex flex-col items-stretch gap-2 w-64 rounded-xl bg-black/90 border border-white/20 p-3 max-h-[calc(100dvh-6rem)] overflow-y-auto"
           style={{
             top: 'calc(3.5rem + env(safe-area-inset-top))',
             right: 'max(1rem, env(safe-area-inset-right))',
@@ -215,7 +227,7 @@ export default function Header({
                 closeOverflow()
               }}
               aria-label="Switch camera"
-              className="min-h-[48px] w-full bg-white/90 text-black px-4 py-3 rounded-lg font-bold shadow text-base active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 focus-visible:ring-offset-2"
+              className="min-h-[48px] w-full bg-white/90 text-black px-4 py-3 rounded-lg font-bold shadow text-base motion-safe:active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 focus-visible:ring-offset-2"
             >
               Switch camera
             </button>
@@ -226,7 +238,7 @@ export default function Header({
               onClearView()
               closeOverflow()
             }}
-            className="min-h-[48px] w-full bg-white/90 text-black px-4 py-3 rounded-lg font-bold shadow text-base active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 focus-visible:ring-offset-2"
+            className="min-h-[48px] w-full bg-white/90 text-black px-4 py-3 rounded-lg font-bold shadow text-base motion-safe:active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 focus-visible:ring-offset-2"
           >
             Clear AR View
           </button>
@@ -236,7 +248,7 @@ export default function Header({
               onExportReport()
               closeOverflow()
             }}
-            className="min-h-[48px] w-full bg-white/90 text-black px-4 py-3 rounded-lg font-bold shadow text-base active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 focus-visible:ring-offset-2"
+            className="min-h-[48px] w-full bg-white/90 text-black px-4 py-3 rounded-lg font-bold shadow text-base motion-safe:active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 focus-visible:ring-offset-2"
           >
             Export Report
           </button>
@@ -245,14 +257,19 @@ export default function Header({
       {qrOpen && !overflowOpen && (
         <QrShare
           onOpen={() => setQrOpen(true)}
-          onClose={() => setQrOpen(false)}
+          onClose={() => {
+            setQrOpen(false)
+            // The menu trigger is gone with the menu; return to the toggle.
+            toggleRef.current?.focus()
+          }}
           hideTrigger
           defaultOpen
         />
       )}
       {!overflowOpen && (
       <div
-        className="px-4 pt-2 flex items-center gap-2 flex-wrap"
+        data-testid="badge-row"
+        className="px-4 pt-2 flex items-center gap-2 flex-wrap pointer-events-none"
         style={{
           paddingLeft: 'max(1rem, env(safe-area-inset-left))',
           paddingRight: 'max(1rem, env(safe-area-inset-right))',

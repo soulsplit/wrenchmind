@@ -70,6 +70,9 @@ export function downsampleTo24k(input: Float32Array, inputRate: number): Float32
   if (inputRate === TARGET_SAMPLE_RATE) return input
   if (!Number.isFinite(inputRate) || inputRate <= 0) return new Float32Array(0)
   const ratio = inputRate / TARGET_SAMPLE_RATE
+  // A denormal-tiny rate underflows the ratio to 0, which would size the
+  // output at Infinity and throw; treat it as an unusable rate.
+  if (!Number.isFinite(ratio) || ratio <= 0) return new Float32Array(0)
   const out = new Float32Array(Math.max(1, Math.floor(input.length / ratio)))
   for (let i = 0; i < out.length; i++) {
     const pos = i * ratio

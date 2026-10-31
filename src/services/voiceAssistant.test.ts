@@ -313,6 +313,23 @@ describe('transcription frames', () => {
     assistant.stop()
   })
 
+  it('resets the restart ladder on session ack', async () => {
+    vi.useFakeTimers()
+    const { assistant } = await startListening()
+    openAndAck(latestSocket())
+    latestSocket().receiveText({ type: 'error', message: 'boom' })
+    await vi.advanceTimersByTimeAsync(500)
+    expect(FakeWebSocket.instances).toHaveLength(2)
+    openAndAck(latestSocket())
+    // The ack reset the ladder: the next failure backs off from 500ms again.
+    latestSocket().receiveText({ type: 'error', message: 'boom' })
+    await vi.advanceTimersByTimeAsync(499)
+    expect(FakeWebSocket.instances).toHaveLength(2)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(FakeWebSocket.instances).toHaveLength(3)
+    assistant.stop()
+  })
+
   it('forwards interim partials to onInterim without dispatching', async () => {
     const onPhrase = vi.fn()
     const onInterim = vi.fn()
@@ -502,6 +519,23 @@ describe('start', () => {
     expect(getLogs().some((e) => e.level === 'error' && e.tag === 'voice')).toBe(true)
   })
 
+  it('diagnoses the mic denial from the thrown error', async () => {
+    installAudio()
+    stubSocket()
+    const getUserMedia = vi.fn(async () => {
+      throw new DOMException('dismissed', 'NotAllowedError')
+    })
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: { getUserMedia } as unknown as MediaDevices,
+      configurable: true,
+    })
+    const onError = vi.fn()
+    const assistant = new VoiceAssistant({ onPhrase: () => undefined, onError })
+    await assistant.start()
+    expect(onError).toHaveBeenCalledWith(expect.stringContaining('tap Allow'))
+    expect(assistant.isListening()).toBe(false)
+  })
+
   it('resumes the audio context on start', async () => {
     const { assistant } = await startListening()
     expect(FakeAudioContext.instances).toHaveLength(1)
@@ -600,6 +634,46 @@ describe('stop', () => {
     latestSocket().serverClose(1000)
     expect(tracks[0].stop).toHaveBeenCalledTimes(1)
     expect(FakeAudioContext.instances[0].close).toHaveBeenCalledTimes(1)
+  })
+
+  it('retires draining media synchronously when start() follows stop() in the drain window', async () => {
+    const { assistant, tracks } = await startListening()
+    const firstCtx = FakeAudioContext.instances[0]
+    const oldWs = latestSocket()
+    openAndAck(oldWs)
+    assistant.stop()
+    // Old media is still held for the graceful drain.
+    expect(tracks[0].stop).not.toHaveBeenCalled()
+    await assistant.start()
+    // Retired synchronously: no leaked mic track or AudioContext.
+    expect(tracks[0].stop).toHaveBeenCalledTimes(1)
+    expect(firstCtx.close).toHaveBeenCalledTimes(1)
+    expect(oldWs.closeCode).toBe(1000)
+    const newWs = latestSocket()
+    expect(newWs).not.toBe(oldWs)
+    expect(assistant.isListening()).toBe(true)
+    // The dead socket can no longer touch the new session.
+    oldWs.serverClose(1000)
+    expect(tracks[0].stop).toHaveBeenCalledTimes(1)
+    // The new session transcribes normally.
+    openAndAck(newWs)
+    FakeWorkletNode.instances[1].emit(new ArrayBuffer(128))
+    expect(binaryFrames(newWs)).toHaveLength(1)
+    assistant.stop()
+  })
+
+  it('does not let the drain close timer tear down the restarted session', async () => {
+    vi.useFakeTimers()
+    const { assistant } = await startListening()
+    const oldWs = latestSocket()
+    openAndAck(oldWs)
+    assistant.stop()
+    await assistant.start()
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(assistant.isListening()).toBe(true)
+    expect(FakeWebSocket.instances).toHaveLength(2)
+    expect(oldWs.closeCode).toBe(1000)
+    assistant.stop()
   })
 })
 

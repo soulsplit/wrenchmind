@@ -154,7 +154,7 @@ describe('Header', () => {
     renderHeader({ hasTorch: true, torchOn: true })
     const toggle = screen.getByRole('button', { name: 'Flashlight' })
     expect(toggle).toHaveAttribute('aria-pressed', 'true')
-    expect(toggle).toHaveClass('bg-green-500', 'text-white')
+    expect(toggle).toHaveClass('bg-confirm-deep', 'text-white')
   })
 
   it('hides the flashlight quick toggle while frozen even with torch support', () => {
@@ -200,7 +200,7 @@ describe('Header', () => {
     renderHeader({ frozen: true })
     const toggle = screen.getByRole('button', { name: 'Freeze frame' })
     expect(toggle).toHaveAttribute('aria-pressed', 'true')
-    expect(toggle).toHaveClass('bg-green-500', 'text-white')
+    expect(toggle).toHaveClass('bg-confirm-deep', 'text-white')
   })
 
   it('keeps freeze and flashlight out of the overflow', () => {
@@ -445,5 +445,57 @@ describe('Header', () => {
     })
     openOverflow()
     expect(screen.getByLabelText('Speech voice')).toHaveValue('Voice A')
+  })
+
+  it('bounds the overflow menu to the viewport with its own scroll', () => {
+    renderHeader()
+    openOverflow()
+    const menu = screen.getByTestId('overflow-menu')
+    expect(menu).toHaveClass('max-h-[calc(100dvh-6rem)]', 'overflow-y-auto')
+  })
+
+  it('lets taps pass through the badge-row gaps to the feed', () => {
+    renderHeader()
+    expect(screen.getByTestId('badge-row')).toHaveClass('pointer-events-none')
+  })
+
+  it('returns focus to the overflow toggle when Escape closes the menu', () => {
+    renderHeader()
+    openOverflow()
+    expectMenuOpen()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expectMenuClosed()
+    expect(screen.getByRole('button', { name: 'More options' })).toHaveFocus()
+  })
+
+  it('returns focus to the overflow toggle after an item press closes the menu', () => {
+    renderHeader()
+    openOverflow()
+    fireEvent.click(screen.getByText('Clear AR View'))
+    expectMenuClosed()
+    expect(screen.getByRole('button', { name: 'More options' })).toHaveFocus()
+  })
+
+  it('returns focus to the overflow toggle after the QR dialog closes', () => {
+    renderHeader()
+    openOverflow()
+    fireEvent.click(screen.getByRole('button', { name: 'QR' }))
+    expect(screen.getByRole('dialog', { name: 'Share via QR code' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'More options' })).toHaveFocus()
+  })
+
+  it('gates press scaling behind motion-safe', () => {
+    renderHeader({ hasTorch: true })
+    expect(screen.getByRole('button', { name: 'Freeze frame' }).className).toContain(
+      'motion-safe:active:scale-95',
+    )
+    expect(screen.getByRole('button', { name: 'Flashlight' }).className).toContain(
+      'motion-safe:active:scale-95',
+    )
+    expect(screen.getByRole('button', { name: 'More options' }).className).toContain(
+      'motion-safe:active:scale-95',
+    )
   })
 })

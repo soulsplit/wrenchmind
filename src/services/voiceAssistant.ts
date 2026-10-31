@@ -1,6 +1,6 @@
 import type { MemoryEntry } from '../types'
 import { hasApiKey } from './metaApi'
-import { permissionBlocker, secureContextBlocker } from './mediaSupport'
+import { describeMicError, permissionBlocker, secureContextBlocker } from './mediaSupport'
 import { logDebug, logError, logInfo, logWarn } from './logger'
 import {
   CLOSE_TIMEOUT_MS,
@@ -125,16 +125,24 @@ export class VoiceAssistant {
       this.callbacks.onError(blocker)
       return
     }
+    if (this.closing) {
+      // A stop() inside the graceful-drain window left the old socket
+      // draining with its mic graph attached: retire both synchronously
+      // (dropping the final transcript) before acquiring, so the new
+      // session's media cannot publish over — and leak — the old one.
+      this.teardownSocket()
+      this.teardownMedia()
+    }
     // The mic stays open for the whole session; tracks stop on stop().
     let stream: MediaStream
     try {
       stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true },
       })
-    } catch {
+    } catch (e) {
       if (epoch !== this.startEpoch) return
       const hint =
-        (await permissionBlocker('microphone', 'Microphone access')) ?? 'Microphone access denied'
+        (await permissionBlocker('microphone', 'Microphone access')) ?? describeMicError(e)
       logError('voice', hint)
       this.callbacks.onError(hint)
       return
@@ -304,12 +312,14 @@ export class VoiceAssistant {
         (typeof frameType === 'string' && /session/i.test(frameType)))
     ) {
       this.acked = true
+      this.restartAttempts = 0
       this.clearAckTimer()
       logInfo('voice', 'transcribe session acknowledged')
       return
     }
     if (typeof frameType === 'string' && /session[-_ ]?created/i.test(frameType)) {
       this.acked = true
+      this.restartAttempts = 0
       this.clearAckTimer()
       logInfo('voice', 'transcribe session acknowledged')
       return

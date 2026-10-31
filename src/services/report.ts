@@ -117,10 +117,14 @@ export function buildReport({ guidance, stepIndex, workingOn, findings, photos, 
     out.push('<p>No repair guidance was generated this session.</p>')
   } else {
     if (guidance) {
-      // First-10-wins by step order: earliest checkpoints survive the cap.
-      const photoByStep = new Map(
-        [...(photos ?? [])].sort((a, b) => a.step - b.step).slice(0, MAX_REPORT_PHOTOS).map((p) => [p.step, p.dataUrl] as const),
-      )
+      // First-10-wins by step order: earliest checkpoints survive the cap,
+      // and the first photo for a repeated step wins.
+      const photoByStep = new Map<number, string>()
+      for (const photo of [...(photos ?? [])]
+        .sort((a, b) => a.step - b.step)
+        .slice(0, MAX_REPORT_PHOTOS)) {
+        if (!photoByStep.has(photo.step)) photoByStep.set(photo.step, photo.dataUrl)
+      }
       renderProcedure(out, guidance, stepIndex, photoByStep)
     }
     if (past.length > 0) {
@@ -162,7 +166,9 @@ export function downloadReport(input: ReportInput): void {
   document.body.appendChild(anchor)
   anchor.click()
   anchor.remove()
-  URL.revokeObjectURL(url)
+  // Revoke past the click: Safari (and "ask where to save" prompts) fetch
+  // the object URL asynchronously, so a synchronous revoke can empty the file.
+  window.setTimeout(() => URL.revokeObjectURL(url), 5000)
 }
 
 interface ShareNavigator {

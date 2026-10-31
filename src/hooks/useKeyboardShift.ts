@@ -36,6 +36,24 @@ function readGeometryHeight(event: Event): number {
 }
 
 /**
+ * Clamps a raw keyboard lift so the dock's top edge never rises above the
+ * header's bottom edge (both in the pane's offset coordinates, which ignore
+ * the lift transform itself). Unmeasurable layouts (missing refs, zero
+ * rects) and already-overlapping docks pass the lift through unchanged.
+ */
+export function resolveKeyboardShift(
+  shift: number,
+  dock: Pick<HTMLElement, 'offsetTop'> | null,
+  header: Pick<HTMLElement, 'offsetTop' | 'offsetHeight'> | null,
+): number {
+  if (!(shift > 0)) return 0
+  if (!dock || !header) return shift
+  const maxShift = dock.offsetTop - (header.offsetTop + header.offsetHeight)
+  if (!(maxShift > 0)) return shift
+  return Math.min(shift, maxShift)
+}
+
+/**
  * Returns how far (px) the bottom dock must lift above the on-screen
  * keyboard. Returns 0 when the keyboard is closed or unsupported.
  */
@@ -80,8 +98,19 @@ export function useKeyboardShift(): number {
     // keyboards (both shrink → the shrunken root already shows the dock).
     if (typeof window !== 'undefined') {
       const viewport: VisualViewport | null | undefined = window.visualViewport
-      if (viewport !== null && viewport !== undefined) {
+      // Exotic shims may expose dimensions without the listener interface.
+      if (
+        viewport !== null &&
+        viewport !== undefined &&
+        typeof viewport.addEventListener === 'function'
+      ) {
         const sync = () => {
+          // Pinch page-zoom also shrinks the visual viewport; only a
+          // scale-1 shrink is a keyboard overlay.
+          if (viewport.scale !== 1) {
+            setShift(0)
+            return
+          }
           setShift(Math.max(0, window.innerHeight - viewport.height))
         }
         sync()

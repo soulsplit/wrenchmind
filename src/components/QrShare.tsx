@@ -6,8 +6,8 @@ const SHARE_URL_KEY = 'wrenchmind.shareUrl'
 
 function isValidUrl(value: string): boolean {
   try {
-    new URL(value)
-    return true
+    const parsed = new URL(value)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
   } catch {
     return false
   }
@@ -64,6 +64,10 @@ export default function QrShare({ onOpen, onClose, hideTrigger = false, defaultO
   const [url, setUrl] = useState(() => loadSavedUrl() ?? window.location.href)
   const [draft, setDraft] = useState(() => loadSavedUrl() ?? window.location.href)
   const dialogRef = useRef<HTMLDivElement>(null)
+  // onClose is an inline arrow from Header: read it through a ref so its
+  // identity churn never retriggers the dialog effects mid-session.
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
 
   const openDialog = (): void => {
     setOpen(true)
@@ -83,7 +87,7 @@ export default function QrShare({ onOpen, onClose, hideTrigger = false, defaultO
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setOpen(false)
-        onClose?.()
+        onCloseRef.current?.()
         return
       }
       // Trap Tab inside the dialog while it is open.
@@ -109,17 +113,19 @@ export default function QrShare({ onOpen, onClose, hideTrigger = false, defaultO
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [open, onClose])
+  }, [open])
 
   // Move focus into the dialog on open and restore it on close/unmount.
   // Deps are [open] only so an onClose identity change mid-dialog never
-  // yanks focus away and back.
+  // yanks focus away and back. Restoring to <body> is skipped: it is never
+  // a useful target, and it would steal focus the opener just placed
+  // (Header returns focus to its toggle after the QR dialog closes).
   useEffect(() => {
     if (!open) return
     const prev = document.activeElement
     dialogRef.current?.focus()
     return () => {
-      if (prev instanceof HTMLElement) prev.focus()
+      if (prev instanceof HTMLElement && prev !== document.body) prev.focus()
     }
   }, [open])
 
@@ -137,13 +143,17 @@ export default function QrShare({ onOpen, onClose, hideTrigger = false, defaultO
     setDraft(window.location.href)
   }
 
+  const shareWarning = getShareWarning(url)
+  // Shrink the code on short (landscape) viewports so the dialog fits.
+  const qrSize = Math.min(256, Math.floor(window.innerHeight * 0.35))
+
   return (
     <div className="flex flex-col items-stretch w-full">
       {!hideTrigger && (
         <button
           type="button"
           onClick={openDialog}
-          className="min-h-[48px] w-full bg-white/90 text-black px-4 py-2 rounded-lg font-bold shadow text-base active:scale-95 transition"
+          className="min-h-[48px] w-full bg-white/90 text-black px-4 py-2 rounded-lg font-bold shadow text-base motion-safe:active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 focus-visible:ring-offset-2"
         >
           QR
         </button>
@@ -157,13 +167,16 @@ export default function QrShare({ onOpen, onClose, hideTrigger = false, defaultO
           <div
             ref={dialogRef}
             tabIndex={-1}
-            className="flex flex-col items-center gap-3 rounded-lg bg-white p-6 max-w-full outline-none"
+            className="flex flex-col items-center gap-3 rounded-lg bg-white p-6 max-w-full max-h-full overflow-y-auto outline-none"
             role="dialog"
             aria-modal="true"
-            aria-label="Share via QR code"
+            aria-labelledby="qr-share-title"
             onClick={(event) => event.stopPropagation()}
           >
-            <QRCodeSVG value={url} size={256} aria-label={`QR code for ${url}`} />
+            <h2 id="qr-share-title" className="text-lg font-bold text-black">
+              Share via QR code
+            </h2>
+            <QRCodeSVG value={url} size={qrSize} aria-label={`QR code for ${url}`} />
             <div className="text-sm text-black/70 break-all max-w-[280px] text-center">{url}</div>
             <label
               className="flex flex-col gap-1 w-full max-w-[280px] text-sm text-black/70"
@@ -184,7 +197,7 @@ export default function QrShare({ onOpen, onClose, hideTrigger = false, defaultO
             <button
               type="button"
               onClick={useCurrentPage}
-              className="min-h-[48px] px-4 py-2 rounded-lg bg-black/10 text-black font-bold text-base active:scale-95 transition"
+              className="min-h-[48px] px-4 py-2 rounded-lg bg-black/10 text-black font-bold text-base motion-safe:active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-black/60"
             >
               Use current page
             </button>
@@ -193,17 +206,16 @@ export default function QrShare({ onOpen, onClose, hideTrigger = false, defaultO
                 Enter a valid URL (https://…) — showing the last valid one.
               </div>
             ) : (
-              url &&
-              getShareWarning(url) && (
+              shareWarning && (
                 <div className="text-sm text-amber-700 bg-amber-100 rounded px-3 py-2 max-w-[280px] text-center">
-                  {getShareWarning(url)}
+                  {shareWarning}
                 </div>
               )
             )}
             <button
               type="button"
               onClick={closeDialog}
-              className="min-h-[48px] px-4 py-2 rounded-lg bg-black/90 text-white font-bold text-base"
+              className="min-h-[48px] px-4 py-2 rounded-lg bg-black/90 text-white font-bold text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-black/60"
             >
               Close
             </button>

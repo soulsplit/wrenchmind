@@ -38,4 +38,11 @@ describe('QueryBar', () => {
     fireEvent.change(screen.getByLabelText('Upload photo'), { target: { files: [] } })
     expect(onPhotoSelect).not.toHaveBeenCalled()
   })
+
+  it('paints the photo button solid so the feed cannot bleed through', () => {
+    render(<QueryBar onSubmit={vi.fn()} onPhotoSelect={vi.fn()} />)
+    const button = screen.getByLabelText('Upload photo').closest('label')
+    expect(button).toHaveClass('bg-black')
+    expect(button).not.toHaveClass('bg-white/10')
+  })
 })

@@ -24,7 +24,9 @@ function downloadLogs(): void {
   document.body.appendChild(anchor)
   anchor.click()
   anchor.remove()
-  URL.revokeObjectURL(url)
+  // Revoke past the click: async downloaders fetch the object URL after
+  // click returns, so a synchronous revoke can empty the file.
+  window.setTimeout(() => URL.revokeObjectURL(url), 5000)
 }
 
 async function copyLogs(): Promise<void> {
@@ -51,7 +53,7 @@ export default function LogPanel() {
     if (!open) return
     setEntries(getLogs())
     return subscribe(() => setEntries(getLogs()))
-  }, [open ])
+  }, [open])
 
   return (
     <div className="flex flex-col items-stretch gap-2 w-full">
@@ -59,7 +61,7 @@ export default function LogPanel() {
         type="button"
         onClick={() => setOpen((was) => !was)}
         aria-expanded={open}
-        className="min-h-[48px] w-full bg-white/90 text-black px-4 py-2 rounded-lg font-bold shadow text-base active:scale-95 transition"
+        className="min-h-[48px] w-full bg-white/90 text-black px-4 py-2 rounded-lg font-bold shadow text-base motion-safe:active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 focus-visible:ring-offset-2"
       >
         {open ? 'Hide Logs' : 'Logs'}
       </button>
@@ -69,21 +71,21 @@ export default function LogPanel() {
             <button
               type="button"
               onClick={() => void copyLogs()}
-              className="px-3 py-1.5 rounded bg-white/90 text-black text-sm font-bold"
+              className="min-h-[44px] px-3 py-1.5 rounded bg-white/90 text-black text-sm font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 focus-visible:ring-offset-2"
             >
               Copy
             </button>
             <button
               type="button"
               onClick={downloadLogs}
-              className="px-3 py-1.5 rounded bg-white/90 text-black text-sm font-bold"
+              className="min-h-[44px] px-3 py-1.5 rounded bg-white/90 text-black text-sm font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 focus-visible:ring-offset-2"
             >
               Download
             </button>
             <button
               type="button"
               onClick={() => clearLogs()}
-              className="px-3 py-1.5 rounded bg-white/90 text-black text-sm font-bold"
+              className="min-h-[44px] px-3 py-1.5 rounded bg-white/90 text-black text-sm font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 focus-visible:ring-offset-2"
             >
               Clear
             </button>

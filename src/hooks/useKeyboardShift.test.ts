@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, renderHook } from '@testing-library/react'
-import { useKeyboardShift } from './useKeyboardShift'
+import { resolveKeyboardShift, useKeyboardShift } from './useKeyboardShift'
 
 /** Fake VirtualKeyboard: dispatching sets event.target to this object. */
 class FakeVirtualKeyboard extends EventTarget {
@@ -21,11 +21,13 @@ class FakeVirtualKeyboard extends EventTarget {
 class FakeVisualViewport extends EventTarget {
   height: number
   width: number
+  scale: number
 
-  constructor(height: number, width: number) {
+  constructor(height: number, width: number, scale = 1) {
     super()
     this.height = height
     this.width = width
+    this.scale = scale
   }
 
   resize(height: number, width: number = this.width): void {
@@ -211,6 +213,13 @@ describe('useKeyboardShift with visualViewport fallback', () => {
     return { vv, ...hook }
   }
 
+  it('ignores a viewport shim without addEventListener', () => {
+    setInnerHeight(800)
+    installVisualViewport({ height: 400, width: 400, scale: 1 } as VisualViewport)
+    const { result } = renderHook(() => useKeyboardShift())
+    expect(result.current).toBe(0)
+  })
+
   it('lifts by the occluded strip when the keyboard overlays', () => {
     const { result, vv } = renderWithViewport()
     expect(result.current).toBe(0)
@@ -280,6 +289,47 @@ describe('useKeyboardShift with visualViewport fallback', () => {
     const removeSpy = vi.spyOn(vv, 'removeEventListener')
     unmount()
     expect(removeSpy).toHaveBeenCalledWith('resize', expect.any(Function))
+  })
+
+  it('ignores visual shrink while the page is pinch-zoomed', () => {
+    setInnerHeight(800)
+    const vv = new FakeVisualViewport(800, 400, 2)
+    installVisualViewport(vv)
+    const { result } = renderHook(() => useKeyboardShift())
+    act(() => {
+      vv.resize(500)
+    })
+    expect(result.current).toBe(0)
+  })
+})
+
+describe('resolveKeyboardShift', () => {
+  function box(offsetTop: number, offsetHeight = 0): HTMLElement {
+    return { offsetTop, offsetHeight } as HTMLElement
+  }
+
+  it('passes small lifts through unchanged', () => {
+    // Dock top at 600, header bottom at 100: 500px of headroom.
+    expect(resolveKeyboardShift(120, box(600), box(0, 100))).toBe(120)
+  })
+
+  it('clamps the lift so the dock top stops at the header bottom', () => {
+    expect(resolveKeyboardShift(300, box(250), box(0, 100))).toBe(150)
+  })
+
+  it('returns 0 for a closed keyboard', () => {
+    expect(resolveKeyboardShift(0, box(600), box(0, 100))).toBe(0)
+  })
+
+  it('leaves the lift alone when the layout is unmeasurable', () => {
+    // Missing refs (or zero rects in tests): clamping would pin the dock.
+    expect(resolveKeyboardShift(120, null, box(0, 100))).toBe(120)
+    expect(resolveKeyboardShift(120, box(600), null)).toBe(120)
+    expect(resolveKeyboardShift(120, box(0), box(0, 0))).toBe(120)
+  })
+
+  it('leaves the lift alone when the dock already overlaps the header', () => {
+    expect(resolveKeyboardShift(120, box(50), box(0, 100))).toBe(120)
   })
 })
 

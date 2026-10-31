@@ -57,11 +57,15 @@ describe('logger', () => {
 
   it('clears entries and notifies subscribers', () => {
     const listener = vi.fn()
-    subscribe(listener)
-    logInfo('t', 'one')
-    clearLogs()
-    expect(getLogs()).toEqual([])
-    expect(listener).toHaveBeenCalledTimes(2)
+    const unsubscribe = subscribe(listener)
+    try {
+      logInfo('t', 'one')
+      clearLogs()
+      expect(getLogs()).toEqual([])
+      expect(listener).toHaveBeenCalledTimes(2)
+    } finally {
+      unsubscribe()
+    }
   })
 
   it('mirrors to the console per level when enabled', () => {

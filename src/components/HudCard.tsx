@@ -24,12 +24,13 @@ const SHELL = 'w-full rounded-2xl bg-black/80 backdrop-blur-md p-4 flex flex-col
 type CardMode = 'normal' | 'minimized' | 'maximized'
 
 const ICON_BUTTON =
-  'min-h-[48px] min-w-[48px] shrink-0 rounded-lg bg-white/15 text-white active:scale-95 transition flex items-center justify-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80'
+  'min-h-[48px] min-w-[48px] shrink-0 rounded-lg bg-white/15 text-white motion-safe:active:scale-95 transition flex items-center justify-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80'
 
 function SkeletonCard() {
   return (
     <section aria-label="Repair guidance" className={`${SHELL} max-h-[44dvh]`}>
       <div role="status" aria-label="Loading guidance" aria-busy="true">
+        <span className="sr-only">Loading guidance</span>
         <div className="motion-safe:animate-pulse flex flex-col gap-2" aria-hidden="true">
           <div className="h-6 w-2/3 rounded bg-white/15" />
           <div className="h-3 w-full rounded bg-white/10" />
@@ -279,7 +280,7 @@ export default function HudCard({
               type="button"
               onClick={() => onStepChange(stepIndex - 1)}
               disabled={safeIndex <= 0}
-              className="min-h-[48px] flex-1 rounded-lg bg-white/15 text-white font-bold text-base active:scale-95 transition disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+              className="min-h-[48px] flex-1 rounded-lg bg-white/15 text-white font-bold text-base motion-safe:active:scale-95 transition disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
             >
               Back
             </button>
@@ -287,7 +288,7 @@ export default function HudCard({
               type="button"
               onClick={() => onStepChange(stepIndex + 1)}
               disabled={safeIndex >= steps.length - 1}
-              className="min-h-[48px] flex-1 rounded-lg bg-white/90 text-black font-bold text-base active:scale-95 transition disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 focus-visible:ring-offset-2"
+              className="min-h-[48px] flex-1 rounded-lg bg-white/90 text-black font-bold text-base motion-safe:active:scale-95 transition disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 focus-visible:ring-offset-2"
             >
               Next Step
             </button>
@@ -296,7 +297,7 @@ export default function HudCard({
         <button
           type="button"
           onClick={onScanAnother}
-          className="min-h-[48px] w-full rounded-lg bg-white/15 text-white font-bold text-base active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+          className="min-h-[48px] w-full rounded-lg bg-white/15 text-white font-bold text-base motion-safe:active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
         >
           Scan Another Part
         </button>

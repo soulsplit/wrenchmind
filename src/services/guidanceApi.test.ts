@@ -281,6 +281,16 @@ describe('fetchGuidance validator edges', () => {
     expect(result.manualTitle).toBeNull()
   })
 
+  it('throws a labeled error when the fenced fallback is not JSON either', async () => {
+    vi.stubEnv('VITE_META_MODEL_API_KEY', 'k')
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValueOnce(jsonResponse(guidanceEnvelope('```json\n{bad json}\n```')))
+    const err = await fetchGuidance('BELT', 'x', '').catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(Error)
+    expect(err).not.toBeInstanceOf(SyntaxError)
+    expect((err as Error).message).toContain('not valid JSON')
+  })
+
   it('throws on non-JSON message text and on missing messages', async () => {
     vi.stubEnv('VITE_META_MODEL_API_KEY', 'k')
     vi.stubGlobal('fetch', fetchMock)
@@ -357,6 +367,13 @@ describe('fetchGuidance failures', () => {
     await expect(fetchGuidance('BELT', 'x', '')).rejects.toThrow('Guidance request failed')
   })
 
+  it('throws before fetch when the key is missing', async () => {
+    vi.stubEnv('VITE_META_MODEL_API_KEY', '')
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(fetchGuidance('BELT', 'x', '')).rejects.toThrow('VITE_META_MODEL_API_KEY')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it('aborts hung requests after 60s', { timeout: 10000 }, async () => {
     vi.useFakeTimers()
     try {
@@ -393,14 +410,21 @@ describe('fetchGuidance session cache', () => {
     )
   }
 
-  it('serves a repeat label+phrase from cache without refetching', async () => {
+  it('serves a repeat label+phrase+context from cache without refetching', async () => {
     stubValid()
-    const first = await fetchGuidance('Belt', 'replace the belt', '')
-    // Normalization is case- and whitespace-insensitive; context is not keyed.
-    const second = await fetchGuidance('  BELT  ', '  Replace The Belt ', 'other context')
+    const first = await fetchGuidance('Belt', 'replace the belt', 'belt worn')
+    // Normalization is case- and whitespace-insensitive across all three parts.
+    const second = await fetchGuidance('  BELT  ', '  Replace The Belt ', '  BELT WORN ')
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(second).toEqual(first)
     expect(getLogs().some((e) => e.tag === 'guidance' && /cache hit/.test(e.message))).toBe(true)
+  })
+
+  it('refetches when the session context changed', async () => {
+    stubValid()
+    await fetchGuidance('belt', 'replace the belt', 'belt worn')
+    await fetchGuidance('belt', 'replace the belt', 'tensioner loose')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
   it('keeps different phrases for the same part as separate entries', async () => {

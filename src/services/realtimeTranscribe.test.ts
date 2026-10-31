@@ -50,6 +50,18 @@ describe('downsampleTo24k', () => {
     expect(out.length).toBeGreaterThan(0)
     expect(out[0]).toBeCloseTo(1, 5)
   })
+
+  it('keeps a single sub-sample output for tiny high-rate input', () => {
+    const out = downsampleTo24k(new Float32Array([0.5]), 48000)
+    expect(out.length).toBe(1)
+    expect(out[0]).toBeCloseTo(0.5, 5)
+  })
+
+  it('returns empty when the resample ratio underflows', () => {
+    expect(downsampleTo24k(new Float32Array([0.5]), Number.MIN_VALUE)).toEqual(
+      new Float32Array(0),
+    )
+  })
 })
 
 describe('encodeS16LE', () => {

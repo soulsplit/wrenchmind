@@ -21,10 +21,12 @@ import {
 } from '../services/metaApi'
 import type { SamPointPrompt } from '../services/metaApi'
 import {
-  clampPct,
+  approxToStage,
+  calloutStyle,
   clampZoomPan,
   identifyWithContext,
   NO_ZOOM,
+  overlayUiScale,
   pinchZoom,
   stageBoxToMedia,
   tapToMedia,
@@ -63,7 +65,7 @@ import Header from './Header'
 import HudCard from './HudCard'
 import Sidebar from './Sidebar'
 import { useDesktopLayout } from '../hooks/useDesktopLayout'
-import { useKeyboardShift } from '../hooks/useKeyboardShift'
+import { resolveKeyboardShift, useKeyboardShift } from '../hooks/useKeyboardShift'
 
 interface Overlay {
   rec: MaskRecord
@@ -111,21 +113,6 @@ function classifyTarget(label: string): OverlayKind {
     return 'fastener'
   }
   return 'component'
-}
-
-/**
- * Edge-collision placement for callout pills: pills near the left/right edges
- * anchor inward (a left-edge pill grows rightward from its point, a right-edge
- * pill grows leftward) instead of centering off-viewport, and pills near the
- * top drop below their point instead of clipping under the header. Long
- * labels are additionally ellipsized by the pill's own max-width.
- */
-function calloutStyle(x: number, y: number): { left: string; top: string; transform: string } {
-  const cx = clampPct(x)
-  const cy = clampPct(y)
-  const tx = cx < 20 ? '0' : cx > 80 ? '-100%' : '-50%'
-  const ty = cy < 25 ? '8px' : 'calc(-100% - 8px)'
-  return { left: `${cx}%`, top: `${cy}%`, transform: `translate(${tx}, ${ty})` }
 }
 
 type StepCommand = 'next' | 'prev' | 'repeat'
@@ -224,7 +211,11 @@ export default function Scanner() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const tapRef = useRef<HTMLDivElement>(null)
   const stageRef = useRef<HTMLDivElement>(null)
+  const paneRef = useRef<HTMLDivElement>(null)
+  const dockRef = useRef<HTMLDivElement>(null)
   const [status, setStatus] = useState<Status>('off')
+  const statusRef = useRef(status)
+  statusRef.current = status
   const [error, setError] = useState<string>('')
   const [voiceOn, setVoiceOn] = useState(false)
   const [callout, setCallout] = useState<Callout | null>(null)
@@ -249,6 +240,8 @@ export default function Scanner() {
   const busyRef = useRef(false)
   /** FIFO of phrases spoken while analysis is in flight; drained in order. */
   const pendingRef = useRef<string[]>([])
+  /** Scene generation: bumped whenever the frame source or AR scene resets. */
+  const sceneEpochRef = useRef(0)
   const pressRef = useRef<{ x: number; y: number; timer: number } | null>(null)
   const suppressTapRef = useRef(false)
   const pointersRef = useRef(new Map<number, { x: number; y: number; sx: number; sy: number; t0: number }>())
@@ -358,9 +351,13 @@ export default function Scanner() {
    * callouts stay in untransformed stage space. The ref mirror keeps the
    * stable handlePhrase voice path flip-aware without re-subscribing.
    */
-  const mirrored = isDesktop || actualFacing === 'user'
+  // Uploaded photos show unmirrored (labels must read correctly) on every
+  // surface; live and camera-freeze mirroring is unchanged.
+  const mirrored = stillKind === 'upload' ? false : isDesktop || actualFacing === 'user'
   const mirroredRef = useRef(mirrored)
   mirroredRef.current = mirrored
+  const frameFitRef = useRef(frameFit)
+  frameFitRef.current = frameFit
   // Keyboard lift: the bottom dock alone rides above the visual viewport.
   const keyboardShift = useKeyboardShift()
 
@@ -378,14 +375,16 @@ export default function Scanner() {
    * an active torch constraint can leave the LED stuck on (the camera is
    * off but the light stays on), so callers must await this BEFORE
    * stopTracks(). Best-effort: resolves silently with no track or when
-   * the device rejects the constraint.
+   * the device rejects the constraint. The optional track override is for
+   * the camera-effect cleanup, which runs after unmount detaches videoRef.
    */
-  const extinguishTorch = useCallback(async () => {
-    const track = (videoRef.current?.srcObject as MediaStream | null)?.getVideoTracks()[0]
-    if (!track?.applyConstraints) return
+  const extinguishTorch = useCallback(async (track?: MediaStreamTrack | null) => {
+    const target =
+      track ?? (videoRef.current?.srcObject as MediaStream | null)?.getVideoTracks()[0]
+    if (!target?.applyConstraints) return
     try {
       const constraint: TorchConstraintSet = { torch: false }
-      await track.applyConstraints({ advanced: [constraint] })
+      await target.applyConstraints({ advanced: [constraint] })
     } catch {
       logWarn('camera', 'flashlight off failed')
     }
@@ -457,20 +456,23 @@ export default function Scanner() {
       }
       ctx.globalCompositeOperation = 'source-over'
     }
+    // Badge chrome holds a constant display size at any capture
+    // resolution (a 24px badge would render ~4px tall from a 4K frame).
+    const ui = overlayUiScale(canvas.getBoundingClientRect().height, canvas.height)
     for (const { rec, kind, label } of overlaysRef.current) {
       const { box } = rec
       ctx.strokeStyle = STROKE[kind]
-      ctx.lineWidth = 3
+      ctx.lineWidth = 3 * ui
       ctx.shadowColor = STROKE[kind]
-      ctx.shadowBlur = 12
+      ctx.shadowBlur = 12 * ui
       // Box corners are inclusive pixels.
       ctx.strokeRect(box.x1, box.y1, box.x2 - box.x1 + 1, box.y2 - box.y1 + 1)
       if (label) {
         ctx.save()
         ctx.shadowBlur = 0
-        ctx.font = 'bold 24px system-ui, sans-serif'
-        const badgeY = Math.max(28, box.y1 - 4)
-        const badgeW = ctx.measureText(label).width + 16
+        ctx.font = `bold ${24 * ui}px system-ui, sans-serif`
+        const badgeY = Math.max(28 * ui, box.y1 - 4 * ui)
+        const badgeW = ctx.measureText(label).width + 16 * ui
         // Clamp the badge origin so badgeX + badgeW never exceeds the canvas.
         const badgeX = Math.min(Math.max(0, box.x1), Math.max(0, canvas.width - badgeW))
         if (mirroredRef.current) {
@@ -482,9 +484,9 @@ export default function Scanner() {
           ctx.scale(-1, 1)
         }
         ctx.fillStyle = 'rgba(0, 0, 0, 0.75)'
-        ctx.fillRect(badgeX, badgeY - 28, badgeW, 28)
+        ctx.fillRect(badgeX, badgeY - 28 * ui, badgeW, 28 * ui)
         ctx.fillStyle = STROKE[kind]
-        ctx.fillText(label, badgeX + 8, badgeY - 7)
+        ctx.fillText(label, badgeX + 8 * ui, badgeY - 7 * ui)
         ctx.restore()
       }
     }
@@ -515,6 +517,8 @@ export default function Scanner() {
   useEffect(() => {
     let stream: MediaStream | null = null
     let cancelled = false
+    // Captured for the cleanup below (reading the ref there is stale-prone).
+    const videoEl = videoRef.current
     ;(async () => {
       const blocker =
         secureContextBlocker('Camera') ?? (await permissionBlocker('camera', 'Camera access'))
@@ -525,7 +529,10 @@ export default function Scanner() {
           // Failed restart (a still exists, so this is not initial load):
           // fall back to frozen so the still stays tappable and unfreezing
           // retries the camera.
-          if (stillRef.current) setFrozen(true)
+          if (stillRef.current) {
+            setFrozen(true)
+            setStillKind((kind) => kind ?? 'camera')
+          }
         }
         return
       }
@@ -565,7 +572,10 @@ export default function Scanner() {
         // Failed restart (a still exists, so this is not initial load):
         // fall back to frozen so the still stays tappable and unfreezing
         // retries the camera.
-        if (stillRef.current) setFrozen(true)
+        if (stillRef.current) {
+          setFrozen(true)
+          setStillKind((kind) => kind ?? 'camera')
+        }
         return
       }
       if (!cancelled) {
@@ -594,13 +604,23 @@ export default function Scanner() {
         stream?.getTracks().forEach((t) => t.stop())
         return
       }
+      // Recheck before attaching: an upload or freeze while getUserMedia was
+      // pending owns the frame now — a late stream must not clobber it.
+      // (The still alone is not a veto: unfreeze restarts keep it until
+      // re-acquire succeeds, and that re-acquire must still attach.)
+      if (frozenRef.current) {
+        logInfo('camera', 'discarding late stream (frozen)')
+        stream?.getTracks().forEach((t) => t.stop())
+        return
+      }
       if (videoRef.current) {
         videoRef.current.srcObject = stream
         try {
           await videoRef.current.play()
           // Re-check after the await: unmount/facing-change during play
-          // must not touch the torn-down element.
-          if (cancelled) return
+          // must not touch the torn-down element, and a freeze during play
+          // must not lose its fresh still.
+          if (cancelled || frozenRef.current) return
           setCameraLive(true)
           // Re-acquire succeeded: drop the still only now so the frame
           // never flashes black during restart.
@@ -614,17 +634,30 @@ export default function Scanner() {
     })()
     return () => {
       cancelled = true
-      // Same stuck-LED hazard as freezing: kill the torch on the live
-      // track first (fire-and-forget, cleanup cannot await) when it is on.
-      if (torchOnRef.current) void extinguishTorch()
-      stopTracks()
+      const stale = stream
+      const stopStale = () => stale?.getTracks().forEach((t) => t.stop())
+      // Same stuck-LED hazard as freezing: torch:false must reach the live
+      // track before it stops. The track comes from the captured stream —
+      // videoRef is already detached when this cleanup runs on unmount.
+      if (torchOnRef.current) {
+        void extinguishTorch(stale?.getVideoTracks()[0]).finally(stopStale)
+      } else stopStale()
+      if (videoEl) videoEl.srcObject = null
+      setCameraLive(false)
+      // Paired with the frozen flag: a still must never outlive the unfreeze
+      // that drops it. (Restart continuity keeps its still with frozen
+      // already false, so it is unaffected.)
+      if (frozenRef.current) {
+        stillRef.current = null
+        setStillUrl(null)
+        setStillKind(null)
+      }
       setFrozen(false)
       setActualFacing('unknown')
       setTorchOn(false)
       setHasTorch(false)
-      stream?.getTracks().forEach((t) => t.stop())
     }
-  }, [facing, restartKey, stopTracks, extinguishTorch])
+  }, [facing, restartKey, extinguishTorch])
 
   // Rotate the badge-row hint while the feed is usable so secondary
   // gestures (long-press remove, 1x circle rule, voice mode) surface
@@ -669,8 +702,13 @@ export default function Scanner() {
 
   // Flip the mounted flag so fire-and-forget guidance/guide fetches skip
   // setState after unmount (React 18 ignores it, but refs stay reachable).
-  useEffect(() => () => {
-    mountedRef.current = false
+  // Set on mount too: StrictMode's double-mount would otherwise leave it
+  // false forever after the first cleanup.
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
   }, [])
 
   // Silence any in-flight speech on unmount so audio never outlives the view.
@@ -726,6 +764,9 @@ export default function Scanner() {
 
   const armRefresh = useCallback(
     (label: string, points: { x: number; y: number }[]) => {
+      // Frozen frames don't move: arming here would spin no-op ticks
+      // against a dead video for as long as the target stands.
+      if (frozenRef.current) return
       targetRef.current = { label, points }
       if (refreshRef.current === null) {
         refreshRef.current = window.setTimeout(() => void tickRefresh(), REFRESH_INTERVAL_MS)
@@ -741,6 +782,21 @@ export default function Scanner() {
       refreshRef.current = null
     }
   }, [])
+
+  /**
+   * Scene-only wipe: paint, callout, tracking, and refresh go; job data
+   * (findings, guidance, photos, memory) stays. Shared by unfreeze, photo
+   * upload, and camera flip.
+   */
+  const clearScenePaint = useCallback(() => {
+    overlaysRef.current = []
+    setCallout(null)
+    setEmptyTarget(false)
+    clearRefresh()
+    trackingRef.current = false
+    setTracking(false)
+    draw(true)
+  }, [clearRefresh, draw])
 
   /**
    * Freeze onto a still canvas — from the live frame or an uploaded photo —
@@ -788,6 +844,10 @@ export default function Scanner() {
     async (file: File) => {
       try {
         const still = await decodePhotoFile(file)
+        // The upload replaces the scene: drop the old paint first so stale
+        // outlines never land on the new photo at dead coordinates.
+        sceneEpochRef.current += 1
+        clearScenePaint()
         await freezeWithStill(still, 'upload')
       } catch (e) {
         const message = e instanceof Error ? e.message : 'Could not read that photo.'
@@ -795,7 +855,7 @@ export default function Scanner() {
         setError(message)
       }
     },
-    [freezeWithStill],
+    [freezeWithStill, clearScenePaint],
   )
 
   /**
@@ -812,33 +872,33 @@ export default function Scanner() {
         const video = videoRef.current
         const vw = video?.videoWidth ?? 0
         const vh = video?.videoHeight ?? 0
-        let still: HTMLCanvasElement | null = null
-        if (video && vw > 0 && vh > 0) {
-          still = document.createElement('canvas')
-          still.width = vw
-          still.height = vh
-          still.getContext('2d')?.drawImage(video, 0, 0, vw, vh)
+        if (!video || vw <= 0 || vh <= 0) {
+          // No frame to hold: refuse instead of wedging on black, and keep
+          // the camera running so the feed can still arrive.
+          logWarn('camera', 'freeze refused: zero-dimension video')
+          setError('Camera frame not ready — try again once the feed appears.')
+          return
         }
+        sceneEpochRef.current += 1
+        const still = document.createElement('canvas')
+        still.width = vw
+        still.height = vh
+        still.getContext('2d')?.drawImage(video, 0, 0, vw, vh)
         await freezeWithStill(still, 'camera')
         return
       }
+      sceneEpochRef.current += 1
       traceRef.current = null
       setTrace(null)
       // Frozen-scene paint is stale once live; job data — findings,
-      // guidance, photos, memory — intentionally preserved.
-      overlaysRef.current = []
-      setCallout(null)
-      setEmptyTarget(false)
-      clearRefresh()
-      trackingRef.current = false
-      setTracking(false)
-      draw(true)
+      // guidance, photos, memory — intentionally preserved. The still kind
+      // stays until the still itself drops on re-acquire.
+      clearScenePaint()
       setFrozen(false)
-      setStillKind(null)
       setRestartKey((k) => k + 1)
       logInfo('camera', 'frame live — AR annotations cleared')
     },
-    [freezeWithStill, clearRefresh, draw],
+    [freezeWithStill, clearScenePaint],
   )
 
   /**
@@ -846,6 +906,22 @@ export default function Scanner() {
    * guidance must never stall or fail the AR phrase pipeline, and the request
    * id drops stale responses when a newer scan supersedes them.
    */
+  /** Pending error-status reset; cleared when a newer analysis starts. */
+  const statusTimerRef = useRef<number | null>(null)
+  const clearStatusTimer = useCallback(() => {
+    if (statusTimerRef.current !== null) {
+      window.clearTimeout(statusTimerRef.current)
+      statusTimerRef.current = null
+    }
+  }, [])
+  const scheduleStatusReset = useCallback(() => {
+    clearStatusTimer()
+    statusTimerRef.current = window.setTimeout(() => {
+      statusTimerRef.current = null
+      setStatus(voiceOnRef.current ? 'listening' : 'off')
+    }, 2000)
+  }, [clearStatusTimer])
+
   /**
    * Voice output only happens in voice mode; otherwise the reply stays
    * visual and the status never claims to speak.
@@ -858,9 +934,12 @@ export default function Scanner() {
     } finally {
       // Stamp even on cancel/preempt: the echo window must cover whatever
       // the speaker actually emitted, including cut-off speech. Yield back
-      // to listening only when no newer reply took over mid-flight.
+      // to listening only when no newer reply took over mid-flight — and
+      // only from speaking, never over a newer analyzing status.
       lastSpokenRef.current = { text, endedAtMs: Date.now() }
-      if (voiceOnRef.current && !isSpeaking()) setStatus('listening')
+      if (voiceOnRef.current && !isSpeaking() && statusRef.current === 'speaking') {
+        setStatus('listening')
+      }
     }
   }, [])
 
@@ -879,13 +958,15 @@ export default function Scanner() {
   const requestGuidance = useCallback((label: string, phrase: string, context: string) => {
     guidanceReqRef.current += 1
     const reqId = guidanceReqRef.current
+    // File the live procedure now: by the time the fetch resolves, the card
+    // (or its step index) may already belong to a newer scan.
+    snapshotGuidance()
     setGuidancePending(true)
     logInfo('guidance', `searching manual for "${label}"`)
     const started = performance.now()
     void fetchGuidance(label, phrase, context).then(
       (result) => {
         if (!mountedRef.current || guidanceReqRef.current !== reqId) return
-        snapshotGuidance()
         setGuidance(result)
         setStepIndex(0)
         setStepPhotos({})
@@ -946,6 +1027,25 @@ export default function Scanner() {
     [frameTarget],
   )
 
+  /**
+   * Release the analysis lock and run the oldest queued phrase, if any. All
+   * three analysis entries funnel through here so a phrase queued during a
+   * tap/circle is never stranded. The catch is belt-and-braces: the entries
+   * already catch internally.
+   */
+  const drainPendingPhrase = useCallback((run: (phrase: string) => Promise<void>) => {
+    busyRef.current = false
+    const next = pendingRef.current.shift()
+    if (next === undefined) return
+    try {
+      void run(next).catch(() => {
+        /* entries catch internally; never reject unhandled */
+      })
+    } catch {
+      /* sync dispatch throw — the lock is already released */
+    }
+  }, [])
+
   // Identity must stay stable (all deps []-stable): the voice effect
   // resubscribes on change, which would recreate the recognizer mid-listen.
   const handlePhrase = useCallback(async (phrase: string) => {
@@ -969,6 +1069,8 @@ export default function Scanner() {
       return
     }
     busyRef.current = true
+    clearStatusTimer()
+    const sceneEpoch = sceneEpochRef.current
     // A dispatched phrase replaces the interim caption; stamp activity so
     // the idle reprompt only fires on real silence.
     setCaption('')
@@ -977,13 +1079,9 @@ export default function Scanner() {
       const { el, w: vw, h: vh } = frameTarget()
       const assistant = assistantRef.current
       if (!el) return
-      if (!hasApiKey()) {
-        setError('API key missing: set VITE_META_MODEL_API_KEY in .env')
-        setStatus(voiceOnRef.current ? 'listening' : 'off')
-        return
-      }
       // Step commands bypass the API pipeline: no camera frames, no
-      // re-reasoning — the card state plus voice already answer them.
+      // re-reasoning — the card state plus voice already answer them. They
+      // sit above the key gate because they cost nothing.
       const command = parseStepCommand(phrase)
       const card = guidanceRef.current
       if (command && card && card.steps.length > 0) {
@@ -1013,6 +1111,11 @@ export default function Scanner() {
         if (!voiceOnRef.current) setStatus('off')
         return
       }
+      if (!hasApiKey()) {
+        setError('API key missing: set VITE_META_MODEL_API_KEY in .env')
+        setStatus(voiceOnRef.current ? 'listening' : 'off')
+        return
+      }
       // Label reads bypass spatial reasoning: one frame, one transcription
       // call, findings shown as chips, spoken, and filed for the report.
       if (isLabelQuery(phrase)) {
@@ -1035,7 +1138,7 @@ export default function Scanner() {
         } catch (e) {
           logError('label', e instanceof Error ? e.message : String(e))
           setStatus('error')
-          window.setTimeout(() => setStatus(voiceOnRef.current ? 'listening' : 'off'), 2000)
+          scheduleStatusReset()
         }
         return
       }
@@ -1064,6 +1167,11 @@ export default function Scanner() {
           )
         }
         if (result.target_label && !trackingRef.current) {
+          if (sceneEpochRef.current !== sceneEpoch) {
+            logDebug('phrase', 'dropping stale result after scene change')
+            setStatus(voiceOnRef.current ? 'listening' : 'off')
+            return
+          }
           // Fire first: guidance needs only the label, so the manual and
           // guide lookups overlap the SAM call instead of waiting for it.
           requestGuidance(result.target_label, phrase, ctxStr)
@@ -1096,6 +1204,11 @@ export default function Scanner() {
             'segment',
             `${recs.length} masks [${spans}] in ${vw}x${vh} (${segmentMs}ms)`,
           )
+          if (sceneEpochRef.current !== sceneEpoch) {
+            logDebug('phrase', 'dropping stale result after scene change')
+            setStatus(voiceOnRef.current ? 'listening' : 'off')
+            return
+          }
           const plural = targetPts.length > 1 && recs.length > 1
           if (plural) logInfo('segment', `isolated ${recs.length} × "${result.target_label}"`)
           overlaysRef.current = recs.map((rec, i) => ({
@@ -1109,11 +1222,23 @@ export default function Scanner() {
             x: result.approx_x,
             y: result.approx_y,
           })
+          // The model answers in raw-frame percents; map through the same
+          // forward fit the overlays use (mirrored in media space first).
+          const stage = stageRef.current
+          const stagePt = approxToStage(
+            result.approx_x,
+            result.approx_y,
+            stage?.clientWidth ?? 0,
+            stage?.clientHeight ?? 0,
+            vw,
+            vh,
+            mirroredRef.current,
+            frameFitRef.current,
+          )
           setCallout({
             label: plural ? `${recs.length} × ${result.target_label}` : result.target_label,
-            // The model answers in raw-frame coords; flip into stage space.
-            x: mirroredRef.current ? 100 - result.approx_x : result.approx_x,
-            y: result.approx_y,
+            x: stagePt.x,
+            y: stagePt.y,
             kind,
           })
           draw()
@@ -1134,14 +1259,12 @@ export default function Scanner() {
       } catch (e) {
         logError('phrase', e instanceof Error ? e.message : String(e))
         setStatus('error')
-        window.setTimeout(() => setStatus(voiceOnRef.current ? 'listening' : 'off'), 2000)
+        scheduleStatusReset()
       }
     } finally {
-      busyRef.current = false
-      const next = pendingRef.current.shift()
-      if (next !== undefined) void handlePhrase(next)
+      drainPendingPhrase(handlePhrase)
     }
-  }, [draw, armRefresh, frameTarget, pinStepPhoto, requestGuidance, requestGuides, speakReply])
+  }, [draw, armRefresh, frameTarget, pinStepPhoto, requestGuidance, requestGuides, speakReply, clearStatusTimer, scheduleStatusReset, drainPendingPhrase])
 
   /**
    * Shared tap/circle outline tail: numbered badge, overlay, memory,
@@ -1197,20 +1320,39 @@ export default function Scanner() {
         return
       }
       busyRef.current = true
+      clearStatusTimer()
+      const sceneEpoch = sceneEpochRef.current
       try {
         setStatus('analyzing')
         setEmptyTarget(false)
+        const rect = layer.getBoundingClientRect()
         const tap = tapToMedia(
           clientX,
           clientY,
-          layer.getBoundingClientRect(),
+          rect,
           vw,
           vh,
           zoomRef.current.scale,
           mirroredRef.current,
           frameFit,
         )
-        if (!tap) throw new Error('No video frame')
+        if (!tap) {
+          // Contain bar taps resolve undefined by design: silent ignore (no
+          // outline, no toast). Unknown dims still throw below.
+          const scale = zoomRef.current.scale
+          const dimsKnown =
+            Number.isFinite(vw) && Number.isFinite(vh) && vw > 0 && vh > 0 &&
+            Number.isFinite(rect.width) && Number.isFinite(rect.height) &&
+            rect.width > 0 && rect.height > 0 &&
+            Number.isFinite(rect.left) && Number.isFinite(rect.top) &&
+            Number.isFinite(clientX) && Number.isFinite(clientY) &&
+            Number.isFinite(scale) && scale > 0
+          if (dimsKnown) {
+            setStatus(voiceOnRef.current ? 'listening' : 'off')
+            return
+          }
+          throw new Error('No video frame')
+        }
         const img = captureVideoFrame(el)
         if (!img) throw new Error('No video frame')
         logInfo('tap', `tap @ (${tap.x.toFixed(1)},${tap.y.toFixed(1)})`)
@@ -1235,6 +1377,11 @@ export default function Scanner() {
           box: targetBox,
           raster: new Uint8Array(0),
         }
+        if (sceneEpochRef.current !== sceneEpoch) {
+          logDebug('tap', 'dropping stale result after scene change')
+          setStatus(voiceOnRef.current ? 'listening' : 'off')
+          return
+        }
         presentOutline({
           display,
           kind,
@@ -1249,12 +1396,12 @@ export default function Scanner() {
       } catch (e) {
         logError('tap', e instanceof Error ? e.message : String(e))
         setStatus('error')
-        window.setTimeout(() => setStatus(voiceOnRef.current ? 'listening' : 'off'), 2000)
+        scheduleStatusReset()
       } finally {
-        busyRef.current = false
+        drainPendingPhrase(handlePhrase)
       }
     },
-    [frozen, cameraLive, frameTarget, frameFit, speakReply, presentOutline],
+    [frozen, cameraLive, frameTarget, frameFit, speakReply, presentOutline, handlePhrase, clearStatusTimer, scheduleStatusReset, drainPendingPhrase],
   )
 
   /**
@@ -1275,22 +1422,38 @@ export default function Scanner() {
         return
       }
       busyRef.current = true
+      clearStatusTimer()
+      const sceneEpoch = sceneEpochRef.current
       try {
         setStatus('analyzing')
         setEmptyTarget(false)
+        const stageW = stage.clientWidth
+        const stageH = stage.clientHeight
         const region = stageBoxToMedia(
           ax,
           ay,
           bx,
           by,
-          stage.clientWidth,
-          stage.clientHeight,
+          stageW,
+          stageH,
           vw,
           vh,
           mirroredRef.current,
           frameFit,
         )
-        if (!region) throw new Error('No video frame')
+        if (!region) {
+          // Fully-bar loops resolve undefined by design: silent ignore like
+          // bar taps. Unknown dims still throw below.
+          const dimsKnown =
+            [ax, ay, bx, by].every(Number.isFinite) &&
+            Number.isFinite(stageW) && Number.isFinite(stageH) && stageW > 0 && stageH > 0 &&
+            Number.isFinite(vw) && Number.isFinite(vh) && vw > 0 && vh > 0
+          if (dimsKnown) {
+            setStatus(voiceOnRef.current ? 'listening' : 'off')
+            return
+          }
+          throw new Error('No video frame')
+        }
         const img = captureVideoFrame(el)
         if (!img) throw new Error('No video frame')
         logInfo('circle', `region @ (${region.x.toFixed(1)},${region.y.toFixed(1)})`)
@@ -1329,6 +1492,11 @@ export default function Scanner() {
           },
           raster: new Uint8Array(0),
         }
+        if (sceneEpochRef.current !== sceneEpoch) {
+          logDebug('circle', 'dropping stale result after scene change')
+          setStatus(voiceOnRef.current ? 'listening' : 'off')
+          return
+        }
         presentOutline({
           display,
           kind,
@@ -1343,12 +1511,12 @@ export default function Scanner() {
       } catch (e) {
         logError('circle', e instanceof Error ? e.message : String(e))
         setStatus('error')
-        window.setTimeout(() => setStatus(voiceOnRef.current ? 'listening' : 'off'), 2000)
+        scheduleStatusReset()
       } finally {
-        busyRef.current = false
+        drainPendingPhrase(handlePhrase)
       }
     },
-    [frozen, cameraLive, frameTarget, frameFit, speakReply, presentOutline],
+    [frozen, cameraLive, frameTarget, frameFit, speakReply, presentOutline, handlePhrase, clearStatusTimer, scheduleStatusReset, drainPendingPhrase],
   )
 
   /** Long-press removal: drop the topmost outline containing the tap point. */
@@ -1392,6 +1560,32 @@ export default function Scanner() {
       pressRef.current = null
     }
   }, [])
+
+  // Off-layer releases: the tap layer's own pointerup/pointercancel only
+  // fires when the release lands on it. This window-level listener guarantees
+  // a pending long-press is cancelled and a stale suppress flag can never
+  // swallow the next tap or fire a removal at a stale point. The suppress
+  // clear is deferred so the release click of the same gesture still consumes
+  // a fresh flag first; pointercancel never precedes a click, so it clears
+  // at once.
+  useEffect(() => {
+    const onRelease = () => {
+      cancelPress()
+      window.setTimeout(() => {
+        suppressTapRef.current = false
+      }, 0)
+    }
+    const onCancel = () => {
+      cancelPress()
+      suppressTapRef.current = false
+    }
+    window.addEventListener('pointerup', onRelease)
+    window.addEventListener('pointercancel', onCancel)
+    return () => {
+      window.removeEventListener('pointerup', onRelease)
+      window.removeEventListener('pointercancel', onCancel)
+    }
+  }, [cancelPress])
 
   // Voice assistant lifecycle. Resubscribes whenever handlePhrase identity
   // changes (recreating the recognizer mid-listen), so handlePhrase and its
@@ -1482,6 +1676,7 @@ export default function Scanner() {
   // scene data); queued pendingRef phrases and an in-flight trace also
   // survive — both resolve against the cleared state harmlessly.
   const resetOverlays = () => {
+    sceneEpochRef.current += 1
     overlaysRef.current = []
     setFindings([])
     setStepPhotos({})
@@ -1574,8 +1769,10 @@ export default function Scanner() {
       setStillKind(null)
       setFrozen(false)
     }
-    // The overlay belongs to the old scene: clear it before switching.
-    resetOverlays()
+    // Scene-only: the overlay belongs to the old camera, but the job —
+    // findings, photos, guidance, memory — survives the switch.
+    sceneEpochRef.current += 1
+    clearScenePaint()
     logInfo('camera', 'switching camera')
     setZoom(NO_ZOOM)
     setFacing((was) => (was === 'environment' ? 'user' : 'environment'))
@@ -1599,7 +1796,7 @@ export default function Scanner() {
   return (
     <div className="relative w-full h-dvh overflow-hidden bg-black lg:flex">
       {/* Feed pane: overlay master at every size; narrows to 2/3 on desktop. */}
-      <div className="relative h-full w-full lg:w-auto lg:min-w-0 lg:flex-1">
+      <div ref={paneRef} className="relative h-full w-full lg:w-auto lg:min-w-0 lg:flex-1">
       {/*
         Zoom stage: video, canvas, tap layer, and callout scale/pan as one
         so masks and pills stay aligned at every zoom. Origin 0 0 keeps the
@@ -1655,6 +1852,7 @@ export default function Scanner() {
           const z = zoomRef.current
           const vw = stage.clientWidth
           const vh = stage.clientHeight
+          const { w: videoW, h: videoH } = frameTarget()
           if (pts.size >= 2) {
             const [a, b] = [...pts.values()]
             const dist = Math.hypot(a.x - b.x, a.y - b.y)
@@ -1665,7 +1863,7 @@ export default function Scanner() {
             const prevMid = pinch ? toViewportPoint(pinch.midX, pinch.midY) : null
             if (pinch && pinch.dist > 0 && dist > 0 && mid && prevMid) {
               setZoom(
-                pinchZoom(z, dist / pinch.dist, prevMid.x, prevMid.y, mid.x, mid.y, vw, vh),
+                pinchZoom(z, dist / pinch.dist, prevMid.x, prevMid.y, mid.x, mid.y, vw, vh, frameFit, videoW, videoH),
               )
             }
             pinchRef.current = { dist, midX, midY }
@@ -1688,7 +1886,7 @@ export default function Scanner() {
             return
           }
           if (z.scale <= ZOOM_MIN) return
-          setZoom(clampZoomPan(z.scale, z.x + dx, z.y + dy, vw, vh))
+          setZoom(clampZoomPan(z.scale, z.x + dx, z.y + dy, vw, vh, frameFit, videoW, videoH))
           if (Math.hypot(e.clientX - p.sx, e.clientY - p.sy) > LONG_PRESS_SLOP_PX) {
             suppressTapRef.current = true
             cancelPress()
@@ -1744,6 +1942,7 @@ export default function Scanner() {
           const stage = stageRef.current
           const focal = toViewportPoint(e.clientX, e.clientY)
           if (!stage || !focal) return
+          const { w: wheelVideoW, h: wheelVideoH } = frameTarget()
           setZoom(
             zoomAt(
               zoomRef.current,
@@ -1752,6 +1951,9 @@ export default function Scanner() {
               focal.y,
               stage.clientWidth,
               stage.clientHeight,
+              frameFit,
+              wheelVideoW,
+              wheelVideoH,
             ),
           )
         }}
@@ -1826,7 +2028,7 @@ export default function Scanner() {
           }}
           onPointerUp={cancelPress}
           onPointerCancel={cancelPress}
-          className="absolute inset-0 z-[5] cursor-crosshair bg-transparent touch-none"
+          className="absolute inset-0 z-[5] cursor-crosshair bg-transparent touch-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/80"
         />
       )}
       {trace && trace.length > 1 && (
@@ -1848,23 +2050,24 @@ export default function Scanner() {
       </div>
       {/*
         Callout pill lives outside the zoom stage so pinch zoom never scales
-        its text: stage coords still map 1:1 (both fill the feed pane), while
-        the padded wrapper keeps the pill inside the safe area. Width caps in
-        pane units so the pill ellipsizes instead of clipping.
+        its text; calloutStyle re-projects the stored point through zoom and
+        clamps it between the header and dock, carrying safe-area insets
+        itself. Width caps in pane units so the pill ellipsizes.
       */}
       {callout && (
-        <div
-          className="absolute inset-0 z-[6] pointer-events-none"
-          style={{
-            paddingLeft: 'env(safe-area-inset-left)',
-            paddingRight: 'env(safe-area-inset-right)',
-          }}
-        >
+        <div className="absolute inset-0 z-[6] pointer-events-none">
           <div
             role="status"
             aria-label={`Located: ${callout.label}`}
             className="absolute bg-black/80 backdrop-blur-md border border-white/20 text-white px-3 py-1.5 rounded-full text-sm font-semibold whitespace-nowrap overflow-hidden text-ellipsis max-w-[calc(100%-2rem)] shadow-lg pointer-events-none"
-            style={calloutStyle(callout.x, callout.y)}
+            style={calloutStyle(callout.x, callout.y, {
+              zoom,
+              stageW: stageRef.current?.clientWidth ?? 0,
+              stageH: stageRef.current?.clientHeight ?? 0,
+              headerH:
+                paneRef.current?.querySelector('header')?.getBoundingClientRect().height ?? 0,
+              dockH: dockRef.current?.getBoundingClientRect().height ?? 0,
+            })}
           >
             <span
               className="inline-block w-2.5 h-2.5 rounded-full mr-2 align-middle"
@@ -1877,6 +2080,10 @@ export default function Scanner() {
           </div>
         </div>
       )}
+      {/*
+        While the one-time voice coach pill is up, the rotating voice hint
+        sits out (last HINTS entry skipped) so the tip never shows twice.
+      */}
       <Header
         status={status}
         live={cameraLive}
@@ -1893,29 +2100,45 @@ export default function Scanner() {
         onTorchToggle={(next) => void toggleTorch(next)}
         frozen={frozen}
         onFreezeToggle={(next) => void setFrozenMode(next)}
-        hint={(frozen || cameraLive) ? HINTS[hintIndex % HINTS.length] : null}
+        hint={
+          frozen || cameraLive
+            ? HINTS[hintIndex % (voiceOn || voiceCoachSeen ? HINTS.length : HINTS.length - 1)]
+            : null
+        }
         voices={voices}
         voiceName={voiceName}
         onVoiceNameChange={handleVoiceNameChange}
       />
       {/*
-        Bottom dock: error toast, HUD card, and thumb-reachable query input
-        stack vertically so nothing can collide at 360px width.
+        Bottom dock: a scrollable middle region plus a pinned query footer,
+        so stacked banners can never push the input out of reach. The dock
+        box is pointer-transparent — only the visible banners, card, and
+        footer catch taps; gaps fall through to the feed. The max height
+        leaves room for the header bar plus badge row above.
       */}
       <div
+        ref={dockRef}
         data-testid="bottom-dock"
-        className="absolute bottom-0 inset-x-0 z-10 flex flex-col gap-2 max-h-[90dvh] overflow-y-auto transition-transform"
+        className="absolute bottom-0 inset-x-0 z-10 flex flex-col gap-2 max-h-[calc(100dvh-8rem)] pointer-events-none transition-transform"
         style={{
           paddingBottom: 'max(1rem, env(safe-area-inset-bottom))',
           paddingLeft: 'max(1rem, env(safe-area-inset-left))',
           paddingRight: 'max(1rem, env(safe-area-inset-right))',
-          transform: keyboardShift > 0 ? `translateY(${-keyboardShift}px)` : undefined,
+          transform:
+            keyboardShift > 0
+              ? `translateY(${-resolveKeyboardShift(
+                  keyboardShift,
+                  dockRef.current,
+                  paneRef.current?.querySelector('header') ?? null,
+                )}px)`
+              : undefined,
         }}
       >
+        <div data-testid="dock-scroll" className="min-h-0 overflow-y-auto flex flex-col gap-2">
         {error && (
           <div
             role="alert"
-            className="w-full rounded-xl bg-black/80 backdrop-blur-md border border-red-500/60 px-4 py-2 flex items-center gap-3"
+            className="w-full rounded-xl bg-black/85 border border-red-500/60 px-4 py-2 flex items-center gap-3 pointer-events-auto"
           >
             <span
               aria-hidden="true"
@@ -1930,7 +2153,7 @@ export default function Scanner() {
                   setRestartKey((k) => k + 1)
                 }}
                 aria-label="Try camera again"
-                className="min-h-[48px] shrink-0 rounded-lg bg-white/15 px-4 text-base font-bold text-white active:scale-95 transition"
+                className="min-h-[48px] shrink-0 rounded-lg bg-white/15 px-4 text-base font-bold text-white motion-safe:active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
               >
                 Retry
               </button>
@@ -1939,18 +2162,20 @@ export default function Scanner() {
               type="button"
               onClick={() => setError('')}
               aria-label="Dismiss error"
-              className="min-h-[48px] min-w-[48px] shrink-0 rounded-lg px-3 text-lg font-bold leading-none text-white/80 active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+              className="min-h-[48px] min-w-[48px] shrink-0 rounded-lg px-3 text-lg font-bold leading-none text-white/80 motion-safe:active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
             >
               <span aria-hidden="true">✕</span>
             </button>
           </div>
         )}
+        {/*
+          One polite live region for the persistent banners (offline, empty
+          target, analyzing, findings, voice tip) instead of five competing
+          announcers. The error alert above stays assertive and separate.
+        */}
+        <div role="status" data-testid="dock-status" className="flex flex-col gap-2">
         {offline && (
-          <div
-            role="status"
-            aria-label="You're offline — connect to analyze the feed and fetch guidance."
-            className="w-full rounded-xl bg-black/80 backdrop-blur-md border border-amber-400/60 px-4 py-2.5 flex items-center gap-3"
-          >
+          <div className="w-full rounded-xl bg-black/85 border border-amber-400/60 px-4 py-2.5 flex items-center gap-3 pointer-events-auto">
             <span
               aria-hidden="true"
               className="inline-block h-2.5 w-2.5 shrink-0 rounded-full bg-amber-400"
@@ -1961,11 +2186,7 @@ export default function Scanner() {
           </div>
         )}
         {emptyTarget && !error && (
-          <div
-            role="status"
-            aria-label="No matching part found — try rephrasing or moving closer."
-            className="w-full rounded-xl bg-black/80 backdrop-blur-md border border-white/20 px-4 py-2 flex items-center gap-3"
-          >
+          <div className="w-full rounded-xl bg-black/85 border border-white/20 px-4 py-2 flex items-center gap-3 pointer-events-auto">
             <span
               aria-hidden="true"
               className="inline-block h-2.5 w-2.5 shrink-0 rounded-full bg-cyan-300"
@@ -1977,7 +2198,7 @@ export default function Scanner() {
               type="button"
               onClick={() => setEmptyTarget(false)}
               aria-label="Dismiss notice"
-              className="min-h-[48px] min-w-[48px] shrink-0 rounded-lg px-3 text-lg font-bold leading-none text-white/80 active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+              className="min-h-[48px] min-w-[48px] shrink-0 rounded-lg px-3 text-lg font-bold leading-none text-white/80 motion-safe:active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
             >
               <span aria-hidden="true">✕</span>
             </button>
@@ -1989,61 +2210,28 @@ export default function Scanner() {
           motion-safe.
         */}
         {status === 'analyzing' && (
-          <div
-            role="status"
-            aria-label="Analyzing"
-            className="pointer-events-none self-center inline-flex items-center gap-2 rounded-full bg-black/70 px-3 py-1.5 text-xs font-semibold text-white"
-          >
+          <div className="pointer-events-none self-center inline-flex items-center gap-2 rounded-full bg-black/70 px-3 py-1.5 text-xs font-semibold text-white">
             <span className="motion-safe:animate-pulse inline-block h-2 w-2 rounded-full bg-cyan-300" />
             Analyzing…
           </div>
         )}
-        {/*
-          Zoom orientation: the +/- controls were deliberately removed, so
-          this chip is the only zoom readout and the only way back to 1x.
-        */}
-        {zoom.scale > 1.01 && (
-          <button
-            type="button"
-            onClick={() => setZoom(NO_ZOOM)}
-            aria-label={`Reset zoom (currently ${zoom.scale.toFixed(1)}x)`}
-            className="self-center inline-flex items-center gap-2 rounded-full bg-black/70 px-3 py-1.5 text-xs font-semibold text-white active:scale-95 transition"
-          >
-            {zoom.scale.toFixed(1)}× · tap to reset
-          </button>
-        )}
         {findings.length > 0 && (
           <div
-            role="status"
-            aria-label="Label findings"
-            className="w-full rounded-xl bg-black/80 backdrop-blur-md border border-white/20 px-4 py-2 flex flex-wrap items-center gap-2"
+            data-testid="label-findings"
+            className="w-full rounded-xl bg-black/85 border border-white/20 px-4 py-2 flex flex-wrap items-center gap-2 pointer-events-auto"
           >
             {findings.map((finding, i) => (
               <span
                 key={`${finding}-${i}`}
-                className="rounded-full bg-white/15 px-3 py-1 text-sm font-mono text-white"
+                className="rounded-full bg-white/15 px-3 py-1 text-sm font-mono text-white max-w-full break-all"
               >
                 {finding}
               </span>
             ))}
           </div>
         )}
-        {(guidancePending || guidance) && !isDesktop && (
-          <HudCard
-            guidance={guidance}
-            pending={guidancePending}
-            stepIndex={stepIndex}
-            onStepChange={changeStep}
-            onScanAnother={clearOverlay}
-            guides={guides}
-          />
-        )}
         {(frozen || cameraLive) && !voiceOn && !voiceCoachSeen && (
-          <div
-            role="status"
-            aria-label="Voice mode tip"
-            className="w-full rounded-xl bg-black/80 backdrop-blur-md border border-cyan-300/40 px-4 py-2 flex items-center gap-3"
-          >
+          <div className="w-full rounded-xl bg-black/85 border border-cyan-300/40 px-4 py-2 flex items-center gap-3 pointer-events-auto">
             <span
               aria-hidden="true"
               className="inline-block h-2.5 w-2.5 shrink-0 rounded-full bg-cyan-300"
@@ -2055,20 +2243,47 @@ export default function Scanner() {
               type="button"
               onClick={dismissVoiceCoach}
               aria-label="Dismiss voice tip"
-              className="min-h-[48px] min-w-[48px] shrink-0 rounded-lg px-3 text-lg font-bold leading-none text-white/80 active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+              className="min-h-[48px] min-w-[48px] shrink-0 rounded-lg px-3 text-lg font-bold leading-none text-white/80 motion-safe:active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
             >
               <span aria-hidden="true">✕</span>
             </button>
           </div>
         )}
+        </div>
         {/*
-          Live interim transcript while the user speaks. Transient and
-          replaced by analysis ("Analyzing…") the moment a turn dispatches.
+          Zoom orientation: the +/- controls were deliberately removed, so
+          this chip is the only zoom readout and the only way back to 1x.
+        */}
+        {zoom.scale > 1.01 && (
+          <button
+            type="button"
+            onClick={() => setZoom(NO_ZOOM)}
+            aria-label={`Reset zoom (currently ${zoom.scale.toFixed(1)}x)`}
+            className="pointer-events-auto self-center inline-flex items-center gap-2 rounded-full bg-black/70 px-3 py-1.5 min-h-[44px] text-xs font-semibold text-white motion-safe:active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+          >
+            {zoom.scale.toFixed(1)}× · tap to reset
+          </button>
+        )}
+        {(guidancePending || guidance) && !isDesktop && (
+          <div data-testid="hud-slot" className="min-h-[160px] pointer-events-auto">
+          <HudCard
+            guidance={guidance}
+            pending={guidancePending}
+            stepIndex={stepIndex}
+            onStepChange={changeStep}
+            onScanAnother={clearOverlay}
+            guides={guides}
+          />
+          </div>
+        )}
+        {/*
+          Live interim transcript while the user speaks: visual only, so
+          partial words don't stutter through the screen reader. Replaced
+          by analysis ("Analyzing…") the moment a turn dispatches.
         */}
         {voiceOn && caption && status !== 'analyzing' && (
           <div
-            role="status"
-            aria-label="Hearing you"
+            aria-live="off"
             data-testid="voice-caption"
             className="pointer-events-none self-center inline-flex max-w-full items-center gap-2 rounded-full bg-black/70 px-3 py-1.5 text-xs font-semibold text-white"
           >
@@ -2076,10 +2291,13 @@ export default function Scanner() {
             <span className="min-w-0 truncate">{caption}…</span>
           </div>
         )}
+        </div>
+        <div className="pointer-events-auto shrink-0">
         <QueryBar
           onSubmit={(text) => void handlePhrase(text)}
           onPhotoSelect={(file) => void addPhoto(file)}
         />
+        </div>
       </div>
       </div>
       {isDesktop && (

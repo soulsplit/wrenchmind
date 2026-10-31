@@ -29,6 +29,9 @@ export const NO_ZOOM: ZoomState = { scale: 1, x: 0, y: 0 }
 /**
  * Clamp pan so the scaled content always covers the viewport: with
  * transform-origin 0 0 the content spans [x, x + vw*s], pinned inside.
+ * In contain mode the fitted content box (from the video dims) replaces
+ * the viewport box: axes where the content still underfills pin centered
+ * instead of panning off-screen.
  */
 export function clampZoomPan(
   scale: number,
@@ -36,6 +39,9 @@ export function clampZoomPan(
   y: number,
   vw: number,
   vh: number,
+  fit: FitMode = 'cover',
+  videoW = 0,
+  videoH = 0,
 ): ZoomState {
   const clamped = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, scale))
   // Snap float dust (e.g. wheel 1.2 * 1/1.2) so 1x stays exactly 1x: the
@@ -43,6 +49,25 @@ export function clampZoomPan(
   const s = Math.abs(clamped - ZOOM_MIN) < 1e-9 ? ZOOM_MIN : clamped
   if (!Number.isFinite(vw) || !Number.isFinite(vh) || vw <= 0 || vh <= 0) {
     return { scale: s, x: 0, y: 0 }
+  }
+  if (fit === 'contain' && Number.isFinite(videoW) && Number.isFinite(videoH) && videoW > 0 && videoH > 0) {
+    const contain = Math.min(vw / videoW, vh / videoH)
+    const cw = videoW * contain
+    const ch = videoH * contain
+    const ox = (vw - cw) / 2
+    const oy = (vh - ch) / 2
+    const fx = Number.isFinite(x) ? x : 0
+    const fy = Number.isFinite(y) ? y : 0
+    // Covering axis: content box covers the viewport. Underfilling axis:
+    // pin centered (the centered content offset equals the centered stage).
+    const nx = cw * s >= vw
+      ? Math.min(-ox * s, Math.max(vw - (ox + cw) * s, fx))
+      : (vw / 2) * (1 - s)
+    const ny = ch * s >= vh
+      ? Math.min(-oy * s, Math.max(vh - (oy + ch) * s, fy))
+      : (vh / 2) * (1 - s)
+    // Normalize -0 (exact-fit edges) so 1x stays exactly {0, 0}.
+    return { scale: s, x: nx + 0, y: ny + 0 }
   }
   const minX = Math.min(0, vw - vw * s)
   const minY = Math.min(0, vh - vh * s)
@@ -64,12 +89,15 @@ export function zoomAt(
   cy: number,
   vw: number,
   vh: number,
+  fit: FitMode = 'cover',
+  videoW = 0,
+  videoH = 0,
 ): ZoomState {
   const scale = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, zoom.scale * factor))
   if (scale === zoom.scale) return zoom
   const px = (cx - zoom.x) / zoom.scale
   const py = (cy - zoom.y) / zoom.scale
-  return clampZoomPan(scale, cx - px * scale, cy - py * scale, vw, vh)
+  return clampZoomPan(scale, cx - px * scale, cy - py * scale, vw, vh, fit, videoW, videoH)
 }
 
 /**
@@ -86,11 +114,14 @@ export function pinchZoom(
   nextY: number,
   vw: number,
   vh: number,
+  fit: FitMode = 'cover',
+  videoW = 0,
+  videoH = 0,
 ): ZoomState {
   const scale = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, zoom.scale * ratio))
   const px = (prevX - zoom.x) / zoom.scale
   const py = (prevY - zoom.y) / zoom.scale
-  return clampZoomPan(scale, nextX - px * scale, nextY - py * scale, vw, vh)
+  return clampZoomPan(scale, nextX - px * scale, nextY - py * scale, vw, vh, fit, videoW, videoH)
 }
 
 /**
@@ -169,7 +200,8 @@ export type FitMode = 'cover' | 'contain'
 
 /**
  * Invert object-contain geometry: the frame scales to fit, letterboxing the
- * leftover bars centered. Taps landing on the bars clamp to the frame edge.
+ * leftover bars centered. Points on the bars resolve undefined so callers
+ * can silently ignore them instead of outlining an edge sliver.
  */
 function containToMedia(
   px: number,
@@ -178,10 +210,13 @@ function containToMedia(
   h: number,
   videoW: number,
   videoH: number,
-): { x: number; y: number } {
+): { x: number; y: number } | undefined {
   const contain = Math.min(w / videoW, h / videoH)
-  const ox = (w - videoW * contain) / 2
-  const oy = (h - videoH * contain) / 2
+  const cw = videoW * contain
+  const ch = videoH * contain
+  const ox = (w - cw) / 2
+  const oy = (h - ch) / 2
+  if (px < ox || px > ox + cw || py < oy || py > oy + ch) return undefined
   return {
     x: Math.min(videoW - 1, Math.max(0, Math.round((px - ox) / contain))),
     y: Math.min(videoH - 1, Math.max(0, Math.round((py - oy) / contain))),
@@ -201,7 +236,8 @@ function containToMedia(
  * When the stage is CSS-mirrored (desktop/front self-view), the prompt
  * flips against the stage width back to raw-frame pixels, while the
  * callout percents stay at the tap: overlays paint in media space on the
- * equally mirrored canvas, so everything lands under the finger.
+ * equally mirrored canvas, so everything lands under the finger. Contain
+ * bar taps resolve undefined for a silent ignore (see the caller).
  */
 export function tapToMedia(
   clientX: number,
@@ -226,8 +262,16 @@ export function tapToMedia(
   const h = rect.height / stageScale
   const px = (clientX - rect.left) / stageScale
   const py = (clientY - rect.top) / stageScale
-  const toMedia = fit === 'contain' ? containToMedia : coverToMedia
-  const media = toMedia(mirrored ? w - px : px, py, w, h, videoW, videoH)
+  if (fit === 'contain') {
+    const media = containToMedia(mirrored ? w - px : px, py, w, h, videoW, videoH)
+    if (!media) return undefined
+    return {
+      point: { ...media, width: videoW, height: videoH },
+      x: clampPct(((clientX - rect.left) / rect.width) * 100),
+      y: clampPct(((clientY - rect.top) / rect.height) * 100),
+    }
+  }
+  const media = coverToMedia(mirrored ? w - px : px, py, w, h, videoW, videoH)
   return {
     point: { ...media, width: videoW, height: videoH },
     x: clampPct(((clientX - rect.left) / rect.width) * 100),
@@ -290,9 +334,47 @@ export function stageBoxToMedia(
   if (!Number.isFinite(videoW) || !Number.isFinite(videoH) || videoW <= 0 || videoH <= 0) {
     return undefined
   }
-  const toMedia = fit === 'contain' ? containToMedia : coverToMedia
-  const c1 = toMedia(mirrored ? stageW - ax : ax, ay, stageW, stageH, videoW, videoH)
-  const c2 = toMedia(mirrored ? stageW - bx : bx, by, stageW, stageH, videoW, videoH)
+  if (fit === 'contain') {
+    // Mirror first (the centered box is flip-symmetric), then intersect
+    // with the image area: fully-bar loops ignore, straddling loops clamp.
+    const flip = (x: number) => (mirrored ? stageW - x : x)
+    const contain = Math.min(stageW / videoW, stageH / videoH)
+    const cw = videoW * contain
+    const ch = videoH * contain
+    const ox = (stageW - cw) / 2
+    const oy = (stageH - ch) / 2
+    const c1x = flip(ax)
+    const c2x = flip(bx)
+    const loX = Math.min(c1x, c2x)
+    const hiX = Math.max(c1x, c2x)
+    const loY = Math.min(ay, by)
+    const hiY = Math.max(ay, by)
+    if (hiX < ox || loX > ox + cw || hiY < oy || loY > oy + ch) return undefined
+    const q = (x: number, y: number) =>
+      containToMedia(
+        Math.min(ox + cw, Math.max(ox, x)),
+        Math.min(oy + ch, Math.max(oy, y)),
+        stageW,
+        stageH,
+        videoW,
+        videoH,
+      )
+    const c1 = q(c1x, ay)
+    const c2 = q(c2x, by)
+    if (!c1 || !c2) return undefined
+    return {
+      box: {
+        x1: Math.min(c1.x, c2.x),
+        y1: Math.min(c1.y, c2.y),
+        x2: Math.max(c1.x, c2.x),
+        y2: Math.max(c1.y, c2.y),
+      },
+      x: clampPct((((ax + bx) / 2) / stageW) * 100),
+      y: clampPct((((ay + by) / 2) / stageH) * 100),
+    }
+  }
+  const c1 = coverToMedia(mirrored ? stageW - ax : ax, ay, stageW, stageH, videoW, videoH)
+  const c2 = coverToMedia(mirrored ? stageW - bx : bx, by, stageW, stageH, videoW, videoH)
   return {
     box: {
       x1: Math.min(c1.x, c2.x),
@@ -303,4 +385,127 @@ export function stageBoxToMedia(
     x: clampPct((((ax + bx) / 2) / stageW) * 100),
     y: clampPct((((ay + by) / 2) / stageH) * 100),
   }
+}
+
+/**
+ * Forward fit: model approx percents (raw-frame space) to 0-100 stage
+ * percents through the same cover/contain geometry the overlay inverses
+ * use. Mirrored stages flip in media space first. Falls back to a plain
+ * mirror flip when stage or media dims are unknown.
+ */
+export function approxToStage(
+  approxX: number,
+  approxY: number,
+  stageW: number,
+  stageH: number,
+  videoW: number,
+  videoH: number,
+  mirrored = false,
+  fit: FitMode = 'cover',
+): { x: number; y: number } {
+  const rawX = clampPct(approxX)
+  const rawY = clampPct(approxY)
+  const fallback = { x: mirrored ? 100 - rawX : rawX, y: rawY }
+  if (
+    !Number.isFinite(stageW) ||
+    !Number.isFinite(stageH) ||
+    stageW <= 0 ||
+    stageH <= 0 ||
+    !Number.isFinite(videoW) ||
+    !Number.isFinite(videoH) ||
+    videoW <= 0 ||
+    videoH <= 0
+  ) {
+    return fallback
+  }
+  const fx = (mirrored ? 100 - rawX : rawX) / 100
+  const fy = rawY / 100
+  if (fit === 'contain') {
+    const contain = Math.min(stageW / videoW, stageH / videoH)
+    const ox = (stageW - videoW * contain) / 2
+    const oy = (stageH - videoH * contain) / 2
+    return {
+      x: clampPct(((fx * videoW * contain + ox) / stageW) * 100),
+      y: clampPct(((fy * videoH * contain + oy) / stageH) * 100),
+    }
+  }
+  const cover = Math.max(stageW / videoW, stageH / videoH)
+  const dx = (videoW * cover - stageW) / 2
+  const dy = (videoH * cover - stageH) / 2
+  return {
+    x: clampPct(((fx * videoW * cover - dx) / stageW) * 100),
+    y: clampPct(((fy * videoH * cover - dy) / stageH) * 100),
+  }
+}
+
+/**
+ * Backing-store UI scale: canvas pixels per display px, so badge fonts,
+ * strokes, and blurs hold a constant on-screen size at any capture
+ * resolution. Falls back to 1 without measurable dims.
+ */
+export function overlayUiScale(displayH: number, canvasH: number): number {
+  if (!Number.isFinite(displayH) || !Number.isFinite(canvasH) || displayH <= 0 || canvasH <= 0) {
+    return 1
+  }
+  return canvasH / displayH
+}
+
+/** Optional geometry for zoom-aware, chrome-aware callout placement. */
+export interface CalloutStyleOpts {
+  zoom?: ZoomState
+  stageW?: number
+  stageH?: number
+  headerH?: number
+  dockH?: number
+}
+
+/**
+ * Edge-collision placement for callout pills: edge pills anchor inward and
+ * near-top pills drop below their point. With stage geometry the point
+ * re-projects through zoom so the pill tracks the zoomed part, clamps into
+ * the header/dock-free strip, and carries safe-area insets itself (wrapper
+ * padding cannot shift an absolute child) with a 0.5rem minimum gutter.
+ */
+export function calloutStyle(
+  x: number,
+  y: number,
+  opts: CalloutStyleOpts = {},
+): { left: string; top: string; transform: string } {
+  const { zoom, stageW = 0, stageH = 0, headerH = 0, dockH = 0 } = opts
+  const stageKnown =
+    Number.isFinite(stageW) && Number.isFinite(stageH) && stageW > 0 && stageH > 0
+  let cx = clampPct(x)
+  let cy = clampPct(y)
+  if (
+    zoom &&
+    stageKnown &&
+    Number.isFinite(zoom.scale) &&
+    zoom.scale > 0 &&
+    Number.isFinite(zoom.x) &&
+    Number.isFinite(zoom.y)
+  ) {
+    const sx = (cx / 100) * stageW
+    const sy = (cy / 100) * stageH
+    cx = clampPct(((sx * zoom.scale + zoom.x) / stageW) * 100)
+    cy = clampPct(((sy * zoom.scale + zoom.y) / stageH) * 100)
+  }
+  let topPct = 0
+  if (stageKnown) {
+    const hh = Number.isFinite(headerH) && headerH > 0 ? headerH : 0
+    const dh = Number.isFinite(dockH) && dockH > 0 ? dockH : 0
+    topPct = (hh / stageH) * 100
+    const bottomPct = ((stageH - dh) / stageH) * 100
+    if (bottomPct >= topPct) cy = Math.min(bottomPct, Math.max(topPct, cy))
+  }
+  const tx = cx < 20 ? '0' : cx > 80 ? '-100%' : '-50%'
+  const chromeKnown = stageKnown && (headerH > 0 || dockH > 0)
+  const nearTop = chromeKnown ? cy - topPct < 12 : cy < 25
+  const ty = nearTop ? '8px' : 'calc(-100% - 8px)'
+  const left =
+    cx < 20
+      ? `calc(${cx}% + max(0.5rem, env(safe-area-inset-left)))`
+      : cx > 80
+        ? `calc(${cx}% - max(0.5rem, env(safe-area-inset-right)))`
+        : `${cx}%`
+  return { left, top: `${cy}%`, transform: `translate(${tx}, ${ty})` }
 }

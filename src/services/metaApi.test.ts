@@ -49,6 +49,16 @@ function sparkEnvelope(content: string): unknown {
   return { choices: [{ message: { content } }] }
 }
 
+function badJsonResponse(): Response {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => {
+      throw new SyntaxError('bad json')
+    },
+  } as unknown as Response
+}
+
 function errorResponse(status: number, bodyText: string): Response {
   return { ok: false, status, text: async () => bodyText } as unknown as Response
 }
@@ -188,7 +198,24 @@ describe('reasonSpatial', () => {
     await expect(reasonSpatial('img', 'p', '')).rejects.toThrow('Muse Spark 500')
 
     fetchMock.mockResolvedValueOnce(jsonResponse(sparkEnvelope('not json')))
-    await expect(reasonSpatial('img', 'p', '')).rejects.toThrow()
+    await expect(reasonSpatial('img', 'p', '')).rejects.toThrow('Muse Spark invalid response')
+  })
+
+  it('throws a labeled API error for malformed bodies, never a raw TypeError/SyntaxError', async () => {
+    vi.stubEnv('VITE_META_MODEL_API_KEY', 'k')
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValueOnce(badJsonResponse())
+    await expect(reasonSpatial('img', 'p', '')).rejects.toThrow('Muse Spark invalid response')
+
+    fetchMock.mockResolvedValueOnce(jsonResponse(null))
+    await expect(reasonSpatial('img', 'p', '')).rejects.toThrow('Muse Spark invalid response')
+
+    fetchMock.mockResolvedValueOnce(jsonResponse(sparkEnvelope('not json')))
+    const err = await reasonSpatial('img', 'p', '').catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(Error)
+    expect(err).not.toBeInstanceOf(SyntaxError)
+    expect(err).not.toBeInstanceOf(TypeError)
+    expect((err as Error).message).toBe('Muse Spark invalid response')
   })
 
   it('includes the server error body in failures, truncated', async () => {
@@ -230,6 +257,13 @@ describe('reasonSpatial', () => {
     expect(getLogs().some((e) => e.level === 'error' && e.message.includes('HTTP 500'))).toBe(
       true,
     )
+  })
+
+  it('throws before fetch when the key is missing', async () => {
+    vi.stubEnv('VITE_META_MODEL_API_KEY', '')
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(reasonSpatial('img', 'p', '')).rejects.toThrow('VITE_META_MODEL_API_KEY')
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })
 
@@ -305,6 +339,30 @@ describe('extractLabelText', () => {
     vi.stubGlobal('fetch', fetchMock)
     fetchMock.mockResolvedValueOnce(errorResponse(500, 'boom'))
     await expect(extractLabelText('img')).rejects.toThrow('Muse Spark 500')
+  })
+
+  it('throws before fetch when the key is missing', async () => {
+    vi.stubEnv('VITE_META_MODEL_API_KEY', '')
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(extractLabelText('img')).rejects.toThrow('VITE_META_MODEL_API_KEY')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('throws a labeled API error for malformed bodies, never a raw TypeError/SyntaxError', async () => {
+    vi.stubEnv('VITE_META_MODEL_API_KEY', 'k')
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValueOnce(badJsonResponse())
+    await expect(extractLabelText('img')).rejects.toThrow('Muse Spark invalid response')
+
+    fetchMock.mockResolvedValueOnce(jsonResponse(null))
+    await expect(extractLabelText('img')).rejects.toThrow('Muse Spark invalid response')
+
+    fetchMock.mockResolvedValueOnce(jsonResponse(sparkEnvelope('not json')))
+    const err = await extractLabelText('img').catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(Error)
+    expect(err).not.toBeInstanceOf(SyntaxError)
+    expect(err).not.toBeInstanceOf(TypeError)
+    expect((err as Error).message).toBe('Muse Spark invalid response')
   })
 })
 
@@ -428,6 +486,13 @@ describe('segmentImage', () => {
     vi.stubGlobal('fetch', fetchMock)
     fetchMock.mockResolvedValueOnce(sseResponse([], 503))
     await expect(collect(segmentImage('img', 'screw'))).rejects.toThrow('SAM 503')
+  })
+
+  it('throws before fetch when the key is missing', async () => {
+    vi.stubEnv('VITE_META_MODEL_API_KEY', '')
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(collect(segmentImage('img', 'screw'))).rejects.toThrow('VITE_META_MODEL_API_KEY')
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('keeps a trailing SSE line that lacks a newline', async () => {
@@ -909,6 +974,30 @@ describe('identifyComponent', () => {
     vi.stubGlobal('fetch', fetchMock)
     fetchMock.mockResolvedValueOnce(errorResponse(500, 'boom'))
     await expect(identifyComponent('img')).rejects.toThrow('Muse Spark 500')
+  })
+
+  it('throws before fetch when the key is missing', async () => {
+    vi.stubEnv('VITE_META_MODEL_API_KEY', '')
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(identifyComponent('img')).rejects.toThrow('VITE_META_MODEL_API_KEY')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('throws a labeled API error for malformed bodies, never a raw TypeError/SyntaxError', async () => {
+    vi.stubEnv('VITE_META_MODEL_API_KEY', 'k')
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockResolvedValueOnce(badJsonResponse())
+    await expect(identifyComponent('img')).rejects.toThrow('Muse Spark invalid response')
+
+    fetchMock.mockResolvedValueOnce(jsonResponse(null))
+    await expect(identifyComponent('img')).rejects.toThrow('Muse Spark invalid response')
+
+    fetchMock.mockResolvedValueOnce(jsonResponse(sparkEnvelope('not json')))
+    const err = await identifyComponent('img').catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(Error)
+    expect(err).not.toBeInstanceOf(SyntaxError)
+    expect(err).not.toBeInstanceOf(TypeError)
+    expect((err as Error).message).toBe('Muse Spark invalid response')
   })
 
   it('scopes the prompt to parts, keys, and everyday objects', async () => {

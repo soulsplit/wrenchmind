@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { describeCameraError, permissionBlocker, secureContextBlocker } from './mediaSupport'
+import {
+  describeCameraError,
+  describeMicError,
+  permissionBlocker,
+  secureContextBlocker,
+} from './mediaSupport'
 
 const originalSecureContext = Object.getOwnPropertyDescriptor(window, 'isSecureContext')
 const originalMediaDevices = Object.getOwnPropertyDescriptor(navigator, 'mediaDevices')
@@ -58,6 +63,21 @@ describe('secureContextBlocker', () => {
     })
     expect(secureContextBlocker('Camera')).toBeNull()
   })
+
+  it('treats an undefined secure context as a non-browser runtime, not insecure', () => {
+    delete (window as unknown as Record<string, unknown>)['isSecureContext']
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: { getUserMedia: vi.fn() },
+      configurable: true,
+    })
+    expect(secureContextBlocker('Camera')).toBeNull()
+  })
+
+  it('still reports missing media devices when the secure context is undefined', () => {
+    delete (window as unknown as Record<string, unknown>)['isSecureContext']
+    Object.defineProperty(navigator, 'mediaDevices', { value: undefined, configurable: true })
+    expect(secureContextBlocker('Camera')).toContain('not available')
+  })
 })
 
 describe('permissionBlocker', () => {
@@ -77,6 +97,14 @@ describe('permissionBlocker', () => {
       configurable: true,
     })
     await expect(permissionBlocker('camera', 'Camera access')).resolves.toBeNull()
+  })
+
+  it('returns null when the permission is granted', async () => {
+    Object.defineProperty(navigator, 'permissions', {
+      value: { query: vi.fn(async () => ({ state: 'granted' })) },
+      configurable: true,
+    })
+    await expect(permissionBlocker('microphone', 'Microphone access')).resolves.toBeNull()
   })
 
   it('returns null when the Permissions API is missing or throws', async () => {
@@ -120,5 +148,36 @@ describe('describeCameraError', () => {
     expect(describeCameraError(new Error('denied'))).toBe('Camera access denied')
     expect(describeCameraError(null)).toBe('Camera access denied')
     expect(describeCameraError('nope')).toBe('Camera access denied')
+  })
+
+  it('maps plain error-likes carrying a DOMException name', () => {
+    expect(describeCameraError({ name: 'NotAllowedError' })).toContain('tap Allow')
+    expect(describeMicError({ name: 'NotReadableError' })).toContain('Microphone is busy')
+  })
+})
+
+describe('describeMicError', () => {
+  it('mirrors the camera diagnoses with microphone wording', () => {
+    expect(describeMicError(new DOMException('dismissed', 'NotAllowedError'))).toContain(
+      'tap Allow',
+    )
+    expect(describeMicError(new DOMException('dismissed', 'NotAllowedError'))).toContain(
+      'Microphone permission',
+    )
+    expect(describeMicError(new DOMException('busy', 'NotReadableError'))).toContain(
+      'Microphone is busy',
+    )
+    expect(describeMicError(new DOMException('none', 'NotFoundError'))).toContain(
+      'No usable microphone',
+    )
+    expect(describeMicError(new DOMException('none', 'OverconstrainedError'))).toContain(
+      'No usable microphone',
+    )
+  })
+
+  it('keeps the generic mic message for unknown shapes', () => {
+    expect(describeMicError(new Error('denied'))).toBe('Microphone access denied')
+    expect(describeMicError(null)).toBe('Microphone access denied')
+    expect(describeMicError('nope')).toBe('Microphone access denied')
   })
 })

@@ -20,6 +20,13 @@ export function secureContextBlocker(kind: 'Camera' | 'Microphone'): string | nu
   return null
 }
 
+/** DOMException name of a getUserMedia failure, or '' for unknown shapes. */
+function errorName(error: unknown): string {
+  if (error instanceof DOMException) return error.name
+  const name = (error as { name?: unknown } | null | undefined)?.name
+  return typeof name === 'string' ? name : ''
+}
+
 /**
  * Actionable message for a getUserMedia failure. The DOMException name is
  * the only signal distinguishing a dismissed prompt from a busy or missing
@@ -27,13 +34,7 @@ export function secureContextBlocker(kind: 'Camera' | 'Microphone'): string | nu
  * static string. Unknown shapes keep the legacy generic message.
  */
 export function describeCameraError(error: unknown): string {
-  const name =
-    error instanceof DOMException
-      ? error.name
-      : typeof (error as { name?: unknown })?.name === 'string'
-        ? (error as { name: string }).name
-        : ''
-  switch (name) {
+  switch (errorName(error)) {
     case 'NotAllowedError':
       return (
         'Camera permission was dismissed — tap Allow in the prompt, ' +
@@ -46,6 +47,28 @@ export function describeCameraError(error: unknown): string {
       return 'No usable camera found on this device.'
     default:
       return 'Camera access denied'
+  }
+}
+
+/**
+ * Actionable message for a mic getUserMedia failure. Mirrors
+ * describeCameraError so mic and camera diagnoses stay unified; callers
+ * must pass the caught error through. Unknown shapes keep the generic mic message.
+ */
+export function describeMicError(error: unknown): string {
+  switch (errorName(error)) {
+    case 'NotAllowedError':
+      return (
+        'Microphone permission was dismissed — tap Allow in the prompt, ' +
+        'or re-enable it in site settings and reload.'
+      )
+    case 'NotReadableError':
+      return 'Microphone is busy — close other tabs or apps using it, then reload.'
+    case 'NotFoundError':
+    case 'OverconstrainedError':
+      return 'No usable microphone found on this device.'
+    default:
+      return 'Microphone access denied'
   }
 }
 

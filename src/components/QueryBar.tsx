@@ -30,7 +30,7 @@ export default function QueryBar({ onSubmit, onPhotoSelect }: QueryBarProps) {
         exactly like a frozen camera frame (tap/circle to identify).
       */}
       <label
-        className="min-h-[48px] min-w-[48px] shrink-0 rounded-full bg-white/10 text-white flex items-center justify-center active:scale-95 transition cursor-pointer focus-within:outline-none focus-within:ring-2 focus-within:ring-white/80"
+        className="min-h-[48px] min-w-[48px] shrink-0 rounded-full bg-black ring-1 ring-white/20 text-white flex items-center justify-center motion-safe:active:scale-95 transition cursor-pointer focus-within:outline-none focus-within:ring-2 focus-within:ring-white/80"
       >
         <span aria-hidden="true" className="text-2xl font-bold leading-none">
           +
@@ -60,7 +60,7 @@ export default function QueryBar({ onSubmit, onPhotoSelect }: QueryBarProps) {
       />
       <button
         type="submit"
-        className="min-h-[48px] min-w-[48px] shrink-0 px-4 py-2 rounded-lg bg-white/90 text-black font-bold shadow text-base active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 focus-visible:ring-offset-2"
+        className="min-h-[48px] min-w-[48px] shrink-0 px-4 py-2 rounded-lg bg-white/90 text-black font-bold shadow text-base motion-safe:active:scale-95 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 focus-visible:ring-offset-2"
       >
         Send
       </button>
