@@ -1,18 +1,22 @@
+<div align="center">
+
 # WrenchMind
 
-> Chatbots talk about your engine. WrenchMind helps you fix it.
+**Chatbots talk about your engine. WrenchMind helps you fix it.**
 
-Built for the [Meta Global Hackathon](https://dev.meta.ai/events/global-hackathon).
+[▶ Watch the demo](https://www.youtube.com/shorts/GKA8VuOoLvE) · [Try it live](https://soulsplit.github.io/wrenchmind/) · [Meta Global Hackathon](https://dev.meta.ai/events/global-hackathon)
 
-What it does:
+[![Full demo flow: ask, outline, repair steps](docs/demo-full-flow.gif)](https://www.youtube.com/shorts/GKA8VuOoLvE)
 
-- Point the phone camera at an engine or piece of hardware and ask a plain question. You will get an augmented reality outline on the part and its name.
-- Each identified part gets a repair card: steps with cautions, specs, tools, warnings, and manual/source links if found.
-- Hands-free voice or chat style interaction.
+</div>
 
-**Live demo:** https://soulsplit.github.io/wrenchmind/
+Point your phone camera at an engine or piece of hardware and ask a plain question. You get an augmented reality outline on the part and its name — plus a repair card with steps, cautions, specs, tools, warnings, and manual/source links when found. Hands-free voice or chat-style interaction throughout.
 
-**Watch the demo:** https://www.youtube.com/shorts/GKA8VuOoLvE
+| See | Ask | Fix |
+| --- | --- | --- |
+| SAM 3.1 draws the AR outline around the part you mean. | Voice, tap, or circle-to-search — all run the same pipeline. | Muse Spark 1.3 writes grounded steps, with matching iFixit guides attached. |
+
+---
 
 ## Demo
 
@@ -20,15 +24,15 @@ Ask a question, get an AR outline plus a repair card:
 
 ![Live AR outline with repair steps](docs/demo-live-outline.png)
 
-The full flow, from question to guided steps:
-
-[![Full demo flow: ask, outline, repair steps](docs/demo-full-flow.gif)](https://www.youtube.com/shorts/GKA8VuOoLvE)
-
-Prefer video? The same flow is on YouTube Shorts: https://www.youtube.com/shorts/GKA8VuOoLvE
-
-Freeze the frame to circle parts at your own pace; typing runs the same pipeline as voice:
+*Live camera: the part is outlined and named.*
 
 <img src="docs/demo-frozen-frame.gif" width="300" alt="Frozen frame with circled part"> <img src="docs/demo-typed-query.gif" width="300" alt="Typed repair question">
+
+*Left: freeze the frame and circle a part. Right: type the question instead of speaking.*
+
+Prefer video? The same flow is on [YouTube Shorts](https://www.youtube.com/shorts/GKA8VuOoLvE).
+
+---
 
 ## Built with Meta AI
 
@@ -43,6 +47,8 @@ results (SAM masks, repair steps, transcription) arrive over the Responses
 and realtime APIs. SAM requests are built with the `@meta-sam/parser`
 helper library. All on-screen AR drawing, tracking, and highlighting is
 custom code.
+
+---
 
 ## Quickstart (local)
 
@@ -73,6 +79,8 @@ GitHub Pages at `https://soulsplit.github.io/wrenchmind/`. Before the first
 push, add the repo secret `VITE_META_MODEL_API_KEY` at Settings →
 Secrets and variables → Actions (the deploy job fails if it is missing),
 and enable Pages with the **GitHub Actions** source in repo settings.
+
+---
 
 ## Features
 
@@ -128,3 +136,7 @@ the key at the provider (referrer/origin allowlist, quota, rotation) and by
 treating a leaked key as rotatable, not secret. Rotate or restrict the key
 after the hackathon. `.env` (real key) and `dist/` (built bundle containing
 the key) stay gitignored and must never be committed.
+
+---
+
+*Built for the [Meta Global Hackathon](https://dev.meta.ai/events/global-hackathon) · [Live demo](https://soulsplit.github.io/wrenchmind/) · [Demo video](https://www.youtube.com/shorts/GKA8VuOoLvE)*
