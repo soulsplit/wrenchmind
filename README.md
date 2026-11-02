@@ -28,10 +28,6 @@ Ask a question, get an AR outline plus a repair card:
 
 <img src="docs/demo-frozen-frame.gif" width="300" alt="Frozen frame with circled part"> <img src="docs/demo-typed-query.gif" width="300" alt="Typed repair question">
 
-*Left: freeze the frame and circle a part. Right: type the question instead of speaking.*
-
-Prefer video? The same flow is on [YouTube Shorts](https://www.youtube.com/shorts/GKA8VuOoLvE).
-
 ---
 
 ## Built with Meta AI
