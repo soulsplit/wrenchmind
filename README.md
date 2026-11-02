@@ -12,6 +12,8 @@ What it does:
 
 **Live demo:** https://soulsplit.github.io/wrenchmind/
 
+**Watch the demo:** https://www.youtube.com/shorts/GKA8VuOoLvE
+
 ## Demo
 
 Ask a question, get an AR outline plus a repair card:
@@ -20,7 +22,9 @@ Ask a question, get an AR outline plus a repair card:
 
 The full flow, from question to guided steps:
 
-![Full demo flow: ask, outline, repair steps](https://github.com/soulsplit/wrenchmind/releases/download/v0.1.6/demo-full-flow.gif)
+[![Full demo flow: ask, outline, repair steps](docs/demo-full-flow.gif)](https://www.youtube.com/shorts/GKA8VuOoLvE)
+
+Prefer video? The same flow is on YouTube Shorts: https://www.youtube.com/shorts/GKA8VuOoLvE
 
 Freeze the frame to circle parts at your own pace; typing runs the same pipeline as voice:
 
